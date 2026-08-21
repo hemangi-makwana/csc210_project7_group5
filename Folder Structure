@@ -1,20 +1,96 @@
 local-skill-exchange-platform/
 │
-├── backend/                  # Java Spring Boot Codebase
-│   ├── src/main/java/        # Java Source Files (DSA Engine & REST Controllers)
-│   └── pom.xml               # Dependencies (Maven)
+├── .gitignore
+├── README.md
+├── pom.xml
 │
-├── frontend/                 # Web Interface Files
-│   ├── css/                  # Stylesheets
-│   ├── js/                   # JavaScript files for API fetching
-│   └── index.html            # Main UI pages
+├── backend/
+│   └── src/
+│       ├── main/
+│       │   ├── java/
+│       │   │   └── com/
+│       │   │       └── skillexchange/
+│       │   │           ├── LocalSkillExchangeApplication.java
+│       │   │           │
+│       │   │           ├── config/
+│       │   │           │   └── CorsConfig.java
+│       │   │           │
+│       │   │           ├── controller/
+│       │   │           │   ├── AuthController.java
+│       │   │           │   ├── BookingController.java
+│       │   │           │   ├── MentorController.java
+│       │   │           │   └── UserController.java
+│       │   │           │
+│       │   │           ├── dsa/
+│       │   │           │   ├── BFSGraphTraversal.java
+│       │   │           │   ├── BookingQueue.java
+│       │   │           │   ├── DFSGraphTraversal.java
+│       │   │           │   ├── MentorMaxHeap.java
+│       │   │           │   ├── UserHashMap.java
+│       │   │           │   └── UserSkillGraph.java
+│       │   │           │
+│       │   │           ├── model/
+│       │   │           │   ├── BookingRequest.java
+│       │   │           │   ├── Skill.java
+│       │   │           │   └── User.java
+│       │   │           │
+│       │   │           ├── repository/
+│       │   │           │   ├── BookingRepository.java
+│       │   │           │   ├── SkillRepository.java
+│       │   │           │   └── UserRepository.java
+│       │   │           │
+│       │   │           └── service/
+│       │   │               ├── BookingService.java
+│       │   │               ├── RecommendationService.java
+│       │   │               └── UserService.java
+│       │   │
+│       │   └── resources/
+│       │       ├── application.properties
+│       │       └── data.sql
+│       │
+│       └── test/
+│           └── java/
+│               └── com/
+│                   └── skillexchange/
+│                       ├── dsa/
+│                       │   ├── GraphTraversalTest.java
+│                       │   └── MentorMaxHeapTest.java
+│                       └── service/
+│                           └── RecommendationServiceTest.java
 │
-├── database/                 # Database Scripts
-│   └── schema.sql            # Table definitions (Users, Skills, Bookings)
+├── frontend/
+│   ├── css/
+│   │   ├── dashboard.css
+│   │   ├── main.css
+│   │   └── search.css
+│   │
+│   ├── js/
+│   │   ├── api.js
+│   │   ├── auth.js
+│   │   ├── booking.js
+│   │   └── search.js
+│   │
+│   ├── index.html
+│   ├── login.html
+│   ├── profile.html
+│   └── search.html
 │
-├── docs/                     # University Submissions & Reports
-│   ├── architecture.png      # Mermaid System Architecture Diagram
-│   ├── integration_test.md   # Integration Test Report
-│   └── tasksheet.md          # Team Tasksheet & Progress Tracker
+├── database/
+│   ├── migrations/
+│   │   └── V1__initial_schema.sql
+│   ├── schema.sql
+│   └── seeds.sql
 │
-└── README.md                 # Primary Project Description
+└── docs/
+    ├── api/
+    │   └── postman_collection.json
+    ├── architecture/
+    │   ├── database_schema_diagram.png
+    │   └── system_architecture.mermaid
+    ├── reports/
+    │   ├── integration_test_report.md
+    │   ├── research_benchmarking_report.md
+    │   └── trade_off_analysis.md
+    └── team/
+        ├── daily_progress_log.md
+        └── task_allocation.md
