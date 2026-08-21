@@ -4,17 +4,17 @@
  A peer-to-peer learning platform connecting students, professionals, and volunteers within universities and local communities  built with real-world Data Structures & Algorithms at its core.
 
 ## Table of Contents
-About the Project
-Motivation
-Features
-DSA Focus
-System Architecture
-Tech Stack
-Getting Started
-Project Structure
-API Overview
-Team
-Roadmap
+- About the Project
+- Motivation
+- Features
+- DSA Focus
+- System Architecture
+- Tech Stack
+- Getting Started
+- Project Structure
+- API Overview
+- Team
+- Roadmap
 
 ## About the Project
 
@@ -27,6 +27,6 @@ This project was built as part of a DSA group project with the goal of applying 
 Finding the right mentor or peer to learn a new skill from is often difficult, especially outside formal institutions. This platform encourages peer-to-peer learning by making it easy to discover people with the skills you want to learn, connect with them, and build a track record of learning and teaching within your community.
 
 ## Users
--Students — looking to learn new skills from peers
--Professionals — sharing expertise and mentoring others
--Volunteers — supporting community learning initiatives
+- Students — looking to learn new skills from peers
+- Professionals — sharing expertise and mentoring others
+- Volunteers — supporting community learning initiatives
