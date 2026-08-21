@@ -1,1 +1,20 @@
-
+local-skill-exchange-platform/
+│
+├── backend/                  # Java Spring Boot Codebase
+│   ├── src/main/java/        # Java Source Files (DSA Engine & REST Controllers)
+│   └── pom.xml               # Dependencies (Maven)
+│
+├── frontend/                 # Web Interface Files
+│   ├── css/                  # Stylesheets
+│   ├── js/                   # JavaScript files for API fetching
+│   └── index.html            # Main UI pages
+│
+├── database/                 # Database Scripts
+│   └── schema.sql            # Table definitions (Users, Skills, Bookings)
+│
+├── docs/                     # University Submissions & Reports
+│   ├── architecture.png      # Mermaid System Architecture Diagram
+│   ├── integration_test.md   # Integration Test Report
+│   └── tasksheet.md          # Team Tasksheet & Progress Tracker
+│
+└── README.md                 # Primary Project Description
