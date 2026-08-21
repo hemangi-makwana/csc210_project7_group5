@@ -30,3 +30,25 @@ Finding the right mentor or peer to learn a new skill from is often difficult, e
 - Students — looking to learn new skills from peers
 - Professionals — sharing expertise and mentoring others
 - Volunteers — supporting community learning initiatives
+
+## Features
+
+| Feature | Description |
+|---|---|
+|  Skill Profiles | Users create profiles listing skills they can teach and want to learn |
+|  Mentor Search | Find mentors based on skill, availability, and relevance |
+|  Session Booking | Schedule and manage 1:1 or group learning sessions |
+|  Reputation System | Ratings and reviews build trust between users |
+| Recommendation Engine | Suggests the best-fit mentors using ranking algorithms |
+|  Learning History | Tracks past sessions, skills learned, and progress over time |
+
+## DSA Focus
+
+| Feature | Data Structure / Algorithm | Purpose |
+|---|---|---|
+| Skill Profile Lookup | **Hash Table** | O(1) average-time lookup of users by skill |
+| Mentor Network | **Graph + Traversal (BFS/DFS)** | Models connections between users, powers mentor discovery |
+| Recommendation Ranking | **Heap (Priority Queue)** | Keeps top-ranked mentor suggestions efficiently sorted |
+| Session Booking | **Queue** | Manages booking requests in order (FIFO) |
+| Search Results | **Sorting & Searching Algorithms** | Orders and filters skill/mentor listings |
+| Mentor Matching Research | **Graph Traversal + Ranking Comparison** | Evaluates different mentor-recommendation strategies |
