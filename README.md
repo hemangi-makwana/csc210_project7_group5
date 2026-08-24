@@ -51,3 +51,73 @@ Feature	Description
 | Session Booking | **Queue** | Manages booking requests in order (FIFO) |
 | Search Results | **Sorting & Searching Algorithms** | Orders and filters skill/mentor listings |
 | Mentor Matching Research | **Graph Traversal + Ranking Comparison** | Evaluates different mentor-recommendation strategies |
+
+## System architecture
+
+```mermaid
+flowchart TB
+    subgraph Client["🖥️ Client Layer"]
+        direction TB
+        U[User: Student / Professional / Volunteer]
+        UI[React SPA - Vite]
+        U -->|interacts with| UI
+    end
+
+    subgraph Frontend["Frontend — React + Vite"]
+        direction TB
+        P1[Skill Profile Pages]
+        P2[Mentor Search & Discovery]
+        P3[Session Booking UI]
+        P4[Reputation & Reviews]
+        P5[Recommendation Dashboard]
+        P6[Learning History]
+    end
+
+    subgraph Backend["Backend Server — Node.js / Express"]
+        direction TB
+        subgraph AuthLayer["Auth & API Gateway"]
+            AUTH[JWT Authentication]
+            RBAC[Role-Based Access Control]
+            ROUTES[REST API Routes]
+        end
+
+        subgraph DSAEngine["DSA Engine — Core Logic"]
+            direction LR
+            HASH[("Hash Table<br/>O(1) skill/profile lookup")]
+            GRAPH[("Graph + BFS/DFS<br/>mentor network traversal")]
+            HEAP[("Min/Max Heap<br/>recommendation ranking")]
+            QUEUE[("Queue<br/>FIFO session booking")]
+            SORT[("Sorting & Searching<br/>result ordering, filtering")]
+        end
+
+        ROUTES --> AUTH
+        ROUTES --> DSAEngine
+    end
+
+    subgraph Data["Data Layer"]
+        direction TB
+        DB[(PostgreSQL / MongoDB)]
+        CACHE[(Optional: Redis Cache)]
+    end
+
+    subgraph Infra["Deployment & DevOps"]
+        direction TB
+        GIT[Git & GitHub - Version Control]
+        CI[CI/CD Pipeline]
+        HOST[Render / Railway / Vercel]
+    end
+
+    UI -->|HTTPS REST calls, JSON| ROUTES
+    DSAEngine -->|reads/writes| DB
+    DSAEngine -.->|optional caching| CACHE
+    GIT --> CI --> HOST
+    HOST -.->|serves| UI
+    HOST -.->|hosts| Backend
+
+    style Client fill:#e6f1fb,stroke:#185fa5,stroke-width:1px
+    style Frontend fill:#e6f1fb,stroke:#185fa5,stroke-width:1px
+    style AuthLayer fill:#f1efe8,stroke:#5f5e5a,stroke-width:1px
+    style DSAEngine fill:#faeeda,stroke:#854f0b,stroke-width:1px
+    style Data fill:#faece7,stroke:#993c1d,stroke-width:1px
+    style Infra fill:#eaf3de,stroke:#3b6d11,stroke-width:1px
+```
