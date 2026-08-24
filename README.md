@@ -17,7 +17,7 @@ A peer-to-peer learning platform connecting students, professionals, and volunte
   
 ## About the Project
 
-Local Skill Exchange and Community Learning Platform is a full-stack web application that enables people to teach and learn skills from each other within their local community or university. Users can create skill profiles, search for mentors, book learning sessions, build reputation through reviews, and receive personalized mentor recommendations — all powered by efficient data structures and algorithms under the hood.
+Local Skill Exchange and Community Learning Platform is a full-stack web application that enables people to teach and learn skills from each other within their local community or university. Users can create skill profiles, search for mentors, book learning sessions, build reputation through reviews, and receive personalized mentor recommendations, all powered by efficient data structures and algorithms under the hood.
 
 This project was built as part of a DSA group project with the goal of applying core computer science concepts to a real, usable system rather than isolated coding exercises.
 
