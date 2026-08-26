@@ -1,123 +1,152 @@
-## Local Skill Exchange and Community Learning Platform
+# Local Skill Exchange and Community Learning Platform
 
-A peer-to-peer learning platform connecting students, professionals, and volunteers within universities and local communities  built with real-world Data Structures & Algorithms at its core.
+A peer-to-peer learning platform connecting students, professionals, and volunteers within universities and local communities — built with real-world Data Structures & Algorithms (DSA) at its core.
+
+---
 
 ## Table of Contents
-- About the Project
-- Motivation
-- Features
-- DSA Focus
-- System Architecture
-- Tech Stack
-- Getting Started
-- Project Structure
-- API Overview
-- Team
-- Roadmap
-  
+- [About the Project](#about-the-project)
+- [Motivation](#motivation)
+- [Target Users](#target-users)
+- [Core Features](#core-features)
+- [Data Structures & Algorithms Core](#data-structures--algorithms-core)
+- [System Architecture](#system-architecture)
+- [API Overview](#api-overview)
+- [Project Structure](#project-structure)
+- [Getting Started](#getting-started)
+- [Team & Roadmap](#team--roadmap)
+
+---
+
 ## About the Project
 
-Local Skill Exchange and Community Learning Platform is a full-stack web application that enables people to teach and learn skills from each other within their local community or university. Users can create skill profiles, search for mentors, book learning sessions, build reputation through reviews, and receive personalized mentor recommendations, all powered by efficient data structures and algorithms under the hood.
+The **Local Skill Exchange and Community Learning Platform** is a full-stack web application that enables people to teach and learn skills from each other within their local community or university. Users can create skill profiles, search for mentors, book learning sessions, build reputation through peer reviews, and receive personalized mentor recommendations.
 
-This project was built as part of a DSA group project with the goal of applying core computer science concepts to a real, usable system rather than isolated coding exercises.
+Built as part of a computer science curriculum project, every core feature is powered by a specific, well-documented data structure or algorithm rather than relying solely on generic database queries.
+
+---
 
 ## Motivation
 
-Finding the right mentor or peer to learn a new skill from is often difficult, especially outside formal institutions. This platform encourages peer-to-peer learning by making it easy to discover people with the skills you want to learn, connect with them, and build a track record of learning and teaching within your community.
+Finding the right mentor or peer to learn a new skill from is often challenging, especially outside formal educational institutions. This platform fosters peer-to-peer learning by making it seamless to discover people with matching skills, connect through direct mentorship networks, and build a verified track record of teaching and learning within the community.
 
-## Users
-- Students — looking to learn new skills from peers
-- Professionals — sharing expertise and mentoring others
-- Volunteers — supporting community learning initiatives
+---
 
- 
- ## Features
-Feature	Description
--  Skill Profiles	Users create profiles listing skills they can teach and want to learn
-- Mentor Search	Find mentors based on skill, availability, and relevance
-- Session Booking	Schedule and manage 1:1 or group learning sessions
-- Reputation System	Ratings and reviews build trust between users
-- Recommendation Engine	Suggests the best-fit mentors based on ranking algorithms
-- Learning History	Tracks past sessions, skills learned, and progress over time
+## Target Users
 
+- **Students**: Seeking academic peer support, exam prep, and practical project skills.
+- **Professionals**: Sharing industry expertise, career insights, and specialized technical knowledge.
+- **Volunteers**: Facilitating community workshops and accessible tutoring programs.
 
-## DSA Focus
+---
 
-| Feature | Data Structure / Algorithm | Purpose |
-|---|---|---|
-| Skill Profile Lookup | **Hash Table** | O(1) average-time lookup of users by skill |
-| Mentor Network | **Graph + Traversal (BFS/DFS)** | Models connections between users, powers mentor discovery |
-| Recommendation Ranking | **Heap (Priority Queue)** | Keeps top-ranked mentor suggestions efficiently sorted |
-| Session Booking | **Queue** | Manages booking requests in order (FIFO) |
-| Search Results | **Sorting & Searching Algorithms** | Orders and filters skill/mentor listings |
-| Mentor Matching Research | **Graph Traversal + Ranking Comparison** | Evaluates different mentor-recommendation strategies |
+## Core Features
 
-## System architecture
+| Feature | Description |
+| :--- | :--- |
+| **Skill Profiles** | Users create detailed profiles listing skills they can teach and topics they want to learn. |
+| **Mentor Search** | Search for mentors filtered by skill category, experience level, and availability. |
+| **Session Booking** | Schedule, manage, and confirm 1:1 or group learning sessions. |
+| **Reputation System** | Community ratings and reviews establish trust and verify mentorship quality. |
+| **Recommendation Engine** | Suggests optimal mentor matches based on composite scoring algorithms. |
+| **Learning History** | Comprehensive tracking of past sessions, topics covered, and progress over time. |
+
+---
+
+## Data Structures & Algorithms Core
+
+| Feature | Data Structure / Algorithm | Purpose & Complexity |
+| :--- | :--- | :--- |
+| **Skill Profile Lookup** | **Hash Table** | $O(1)$ average-case lookup of user profiles by skill keywords. |
+| **Mentor Network Discovery** | **Graph + BFS/DFS Traversal** | Models peer connections; BFS finds shortest network paths, DFS finds skill clusters. |
+| **Recommendation Ranking** | **Heap (Priority Queue)** | Keeps top-$k$ mentor recommendations efficiently sorted by composite score. |
+| **Session Booking Pipeline** | **FIFO Queue** | Processes booking requests chronologically to prevent scheduling collisions. |
+| **Search & Filtering** | **Sorting & Searching Algorithms** | Efficiently orders and filters mentor listings by rating, proximity, and relevance. |
+
+---
+
+## System Architecture
+
+The application is structured into a modular **4-layer architecture**:
+
+1. **Client Layer**: Browser-based interface used by students, professionals, and volunteers.
+2. **Frontend Layer**: React + Vite Single Page Application (SPA) managing client state and routing.
+3. **Backend Layer**: Node.js / Express service comprising:
+   - **Auth & API Gateway**: JWT authentication, Role-Based Access Control (RBAC), input validation.
+   - **DSA Engine**: Core algorithmic engine implementing Hash Tables, Graphs, Heaps, and Queues.
+4. **Data Layer**: PostgreSQL / MongoDB for persistent records with optional Redis caching.
 
 ```mermaid
-flowchart TB
-    subgraph Client["🖥️ Client Layer"]
-        direction TB
-        U[User: Student / Professional / Volunteer]
-        UI[React SPA - Vite]
-        U -->|interacts with| UI
+flowchart TD
+    subgraph Client["1. Client Layer"]
+        U1["Student / Professional / Volunteer"]
     end
 
-    subgraph Frontend["Frontend — React + Vite"]
-        direction TB
-        P1[Skill Profile Pages]
-        P2[Mentor Search & Discovery]
-        P3[Session Booking UI]
-        P4[Reputation & Reviews]
-        P5[Recommendation Dashboard]
-        P6[Learning History]
+    subgraph Frontend["2. Frontend Layer (React + Vite)"]
+        SPA["React SPA"]
     end
 
-    subgraph Backend["Backend Server — Node.js / Express"]
-        direction TB
-        subgraph AuthLayer["Auth & API Gateway"]
-            AUTH[JWT Authentication]
-            RBAC[Role-Based Access Control]
-            ROUTES[REST API Routes]
-        end
-
-        subgraph DSAEngine["DSA Engine — Core Logic"]
-            direction LR
-            HASH[("Hash Table<br/>O(1) skill/profile lookup")]
-            GRAPH[("Graph + BFS/DFS<br/>mentor network traversal")]
-            HEAP[("Min/Max Heap<br/>recommendation ranking")]
-            QUEUE[("Queue<br/>FIFO session booking")]
-            SORT[("Sorting & Searching<br/>result ordering, filtering")]
-        end
-
-        ROUTES --> AUTH
-        ROUTES --> DSAEngine
+    subgraph Backend["3. Backend Layer (Node.js / Express)"]
+        GW["Auth & API Gateway (JWT / RBAC)"]
+        DSA["DSA Engine (Hash Table, Graph, Heap, Queue, Sorters)"]
+        GW --> DSA
     end
 
-    subgraph Data["Data Layer"]
-        direction TB
-        DB[(PostgreSQL / MongoDB)]
-        CACHE[(Optional: Redis Cache)]
+    subgraph Data["4. Data Layer"]
+        DB[("Database (PostgreSQL / MongoDB)")]
     end
 
-    subgraph Infra["Deployment & DevOps"]
-        direction TB
-        GIT[Git & GitHub - Version Control]
-        CI[CI/CD Pipeline]
-        HOST[Render / Railway / Vercel]
-    end
-
-    UI -->|HTTPS REST calls, JSON| ROUTES
-    DSAEngine -->|reads/writes| DB
-    DSAEngine -.->|optional caching| CACHE
-    GIT --> CI --> HOST
-    HOST -.->|serves| UI
-    HOST -.->|hosts| Backend
-
-    style Client fill:#e6f1fb,stroke:#185fa5,stroke-width:1px
-    style Frontend fill:#e6f1fb,stroke:#185fa5,stroke-width:1px
-    style AuthLayer fill:#f1efe8,stroke:#5f5e5a,stroke-width:1px
-    style DSAEngine fill:#faeeda,stroke:#854f0b,stroke-width:1px
-    style Data fill:#faece7,stroke:#993c1d,stroke-width:1px
-    style Infra fill:#eaf3de,stroke:#3b6d11,stroke-width:1px
+    U1 --> SPA
+    SPA -->|"REST API (JSON over HTTPS)"| GW
+    DSA --> DB
 ```
+
+> 📖 **Full Architectural Documentation**: For in-depth architectural specifications, complete sequence diagrams, database ER diagrams, and REST API contract details, refer to [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+---
+
+## API Overview
+
+The backend exposes a stateless REST API consumed by the frontend client:
+
+| HTTP Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/api/auth/register` | Register a new user account |
+| `POST` | `/api/auth/login` | Authenticate user and issue JWT |
+| `GET` | `/api/skills/search?query=` | Search mentors by skill keyword |
+| `GET` | `/api/users/:id` | Fetch user profile and skill set |
+| `PUT` | `/api/users/:id/skills` | Update user's taught/wanted skills |
+| `GET` | `/api/recommendations/:userId` | Get ranked mentor recommendations |
+| `POST` | `/api/sessions/book` | Enqueue a session booking request |
+| `GET` | `/api/users/:id/history` | Fetch past sessions and learning history |
+| `POST` | `/api/reviews` | Submit rating and review for a session |
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#6-rest-api-contract) for full request/response schemas.
+
+---
+
+## Project Structure
+
+```
+.
+├── docs/
+│   └── ARCHITECTURE.md    # Complete 4-layer system architecture & specifications
+├── frontend/
+│   └── README.md          # React + Vite frontend application overview
+├── backend/
+│   └── README.md          # Node.js / Express backend & DSA engine overview
+└── README.md              # Project overview and entry point
+```
+
+---
+
+## Getting Started
+
+*(Installation, local development setup instructions, and prerequisites will be documented here as development progresses.)*
+
+---
+
+## Team & Roadmap
+
+- **Team**: CSC210 Group 5
+- **Status**: System Architecture & Specification Phase Complete
