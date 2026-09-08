@@ -1,0 +1,611 @@
+/* ==========================================================================
+   Global Stylesheet for SkillExchange Frontend
+   Designed for clean readability, modern aesthetics, and reusable UI classes.
+   ========================================================================== */
+
+:root {
+  /* Core Color Palette */
+  --color-primary: #3b82f6;
+  --color-primary-hover: #2563eb;
+  --color-primary-light: #eff6ff;
+  --color-secondary: #64748b;
+  --color-secondary-hover: #475569;
+  --color-success: #10b981;
+  --color-success-light: #ecfdf5;
+  --color-warning: #f59e0b;
+  --color-warning-light: #fffbeb;
+  --color-danger: #ef4444;
+  --color-danger-light: #fef2f2;
+  
+  /* Neutral Background & Surface Colors */
+  --color-background: #f8fafc;
+  --color-surface: #ffffff;
+  --color-surface-hover: #f1f5f9;
+  --color-border: #e2e8f0;
+  --color-border-dark: #cbd5e1;
+
+  /* Text Colors */
+  --color-text-main: #0f172a;
+  --color-text-muted: #64748b;
+  --color-text-inverse: #ffffff;
+
+  /* Layout & Sizing */
+  --font-family-base: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  --border-radius-sm: 6px;
+  --border-radius-md: 10px;
+  --border-radius-lg: 16px;
+  --border-radius-full: 9999px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -4px rgba(0, 0, 0, 0.05);
+  
+  /* Transitions */
+  --transition-fast: 0.15s ease;
+  --transition-normal: 0.25s ease;
+}
+
+/* Base Reset & Typography */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-family-base);
+  background-color: var(--color-background);
+  color: var(--color-text-main);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+}
+
+a {
+  color: var(--color-primary);
+  text-decoration: none;
+  transition: color var(--transition-fast);
+}
+
+a:hover {
+  color: var(--color-primary-hover);
+}
+
+/* Application Layout Structure */
+#root {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.page {
+  flex: 1;
+  max-width: 1200px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+}
+
+.page-header {
+  margin-bottom: 2rem;
+}
+
+.page-title {
+  font-size: 1.875rem;
+  font-weight: 700;
+  color: var(--color-text-main);
+  letter-spacing: -0.025em;
+  margin-bottom: 0.5rem;
+}
+
+.page-subtitle {
+  color: var(--color-text-muted);
+  font-size: 1.05rem;
+}
+
+/* ==========================================================================
+   Navigation Bar Styles
+   ========================================================================== */
+.navbar {
+  background-color: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  box-shadow: var(--shadow-sm);
+}
+
+.navbar-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0.85rem 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.navbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--color-text-main);
+}
+
+.navbar-brand-icon {
+  font-size: 1.5rem;
+}
+
+.navbar-links {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  list-style: none;
+}
+
+.navbar-link {
+  color: var(--color-text-muted);
+  font-weight: 500;
+  font-size: 0.95rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--border-radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.navbar-link:hover,
+.navbar-link.active {
+  color: var(--color-primary);
+  background-color: var(--color-primary-light);
+}
+
+.navbar-auth {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.navbar-user-greeting {
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--color-text-main);
+  background: var(--color-primary-light);
+  padding: 0.35rem 0.75rem;
+  border-radius: var(--border-radius-full);
+}
+
+/* ==========================================================================
+   Card Styles
+   ========================================================================== */
+.card {
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--border-radius-md);
+  padding: 1.5rem;
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.card:hover {
+  box-shadow: var(--shadow-md);
+}
+
+.card-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+  color: var(--color-text-main);
+}
+
+.card-subtitle {
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+  margin-bottom: 1rem;
+}
+
+/* ==========================================================================
+   Button Styles
+   ========================================================================== */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+  padding: 0.625rem 1.25rem;
+  border-radius: var(--border-radius-sm);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background-color var(--transition-fast), border-color var(--transition-fast), transform var(--transition-fast);
+  text-decoration: none;
+}
+
+.btn:active {
+  transform: scale(0.98);
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-sm {
+  padding: 0.35rem 0.75rem;
+  font-size: 0.85rem;
+}
+
+.btn-lg {
+  padding: 0.85rem 1.75rem;
+  font-size: 1.1rem;
+}
+
+.btn-primary {
+  background-color: var(--color-primary);
+  color: var(--color-text-inverse);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background-color: var(--color-primary-hover);
+  color: var(--color-text-inverse);
+}
+
+.btn-secondary {
+  background-color: var(--color-secondary);
+  color: var(--color-text-inverse);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background-color: var(--color-secondary-hover);
+}
+
+.btn-outline {
+  background-color: transparent;
+  border-color: var(--color-border-dark);
+  color: var(--color-text-main);
+}
+
+.btn-outline:hover:not(:disabled) {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-secondary);
+}
+
+.btn-danger {
+  background-color: var(--color-danger);
+  color: var(--color-text-inverse);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background-color: #dc2626;
+}
+
+.btn-danger-outline {
+  background-color: transparent;
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.btn-danger-outline:hover:not(:disabled) {
+  background-color: var(--color-danger-light);
+}
+
+/* ==========================================================================
+   Form & Input Styles
+   ========================================================================== */
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.form-label {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--color-text-main);
+}
+
+.form-helper {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+.form-input,
+.form-select,
+.form-textarea {
+  width: 100%;
+  font-family: inherit;
+  font-size: 0.95rem;
+  padding: 0.625rem 0.875rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--border-radius-sm);
+  background-color: var(--color-surface);
+  color: var(--color-text-main);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.form-input:focus,
+.form-select:focus,
+.form-textarea:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+}
+
+.form-textarea {
+  min-height: 100px;
+  resize: vertical;
+}
+
+/* ==========================================================================
+   Chip & Badge Styles (For skills and levels)
+   ========================================================================== */
+.chip-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background-color: var(--color-primary-light);
+  color: var(--color-primary-hover);
+  border: 1px solid #bfdbfe;
+  font-size: 0.85rem;
+  font-weight: 500;
+  padding: 0.3rem 0.65rem;
+  border-radius: var(--border-radius-full);
+}
+
+.chip-secondary {
+  background-color: #f1f5f9;
+  color: #475569;
+  border-color: #e2e8f0;
+}
+
+.chip-level {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  background-color: #dbeafe;
+  color: #1e40af;
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--border-radius-full);
+}
+
+.chip-remove {
+  background: none;
+  border: none;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0.15rem;
+  border-radius: 50%;
+}
+
+.chip-remove:hover {
+  color: var(--color-danger);
+  background-color: var(--color-danger-light);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.6rem;
+  border-radius: var(--border-radius-full);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.badge-student {
+  background-color: #e0f2fe;
+  color: #0369a1;
+}
+
+.badge-professional {
+  background-color: #fef3c7;
+  color: #b45309;
+}
+
+.badge-volunteer {
+  background-color: #dcfce7;
+  color: #15803d;
+}
+
+/* ==========================================================================
+   Feedback & Alert Banner Styles
+   ========================================================================== */
+.demo-banner {
+  background-color: #fffbeb;
+  border-left: 4px solid var(--color-warning);
+  color: #92400e;
+  padding: 0.75rem 1rem;
+  border-radius: var(--border-radius-sm);
+  margin-bottom: 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.9rem;
+  box-shadow: var(--shadow-sm);
+}
+
+.demo-banner-badge {
+  background-color: #fef3c7;
+  color: #b45309;
+  font-weight: 700;
+  font-size: 0.75rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: var(--border-radius-full);
+  text-transform: uppercase;
+}
+
+.alert {
+  padding: 0.85rem 1.15rem;
+  border-radius: var(--border-radius-sm);
+  margin-bottom: 1rem;
+  font-size: 0.92rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.alert-success {
+  background-color: var(--color-success-light);
+  color: #065f46;
+  border: 1px solid #a7f3d0;
+}
+
+.alert-error {
+  background-color: var(--color-danger-light);
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+
+.alert-info {
+  background-color: var(--color-primary-light);
+  color: #1e40af;
+  border: 1px solid #bfdbfe;
+}
+
+.loader-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem 1rem;
+  color: var(--color-text-muted);
+}
+
+.spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid #e2e8f0;
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-bottom: 0.75rem;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.empty-state {
+  text-align: center;
+  padding: 3.5rem 1.5rem;
+  background-color: var(--color-surface);
+  border: 1px dashed var(--color-border-dark);
+  border-radius: var(--border-radius-md);
+  margin: 1.5rem 0;
+}
+
+.empty-state-icon {
+  font-size: 2.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.empty-state-title {
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin-bottom: 0.4rem;
+  color: var(--color-text-main);
+}
+
+.empty-state-description {
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+  max-width: 450px;
+  margin: 0 auto;
+}
+
+/* ==========================================================================
+   Star Rating Styles
+   ========================================================================== */
+.star-rating {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.star-rating-icon {
+  color: #fbbf24;
+  font-size: 1.1rem;
+}
+
+.star-rating-icon.empty {
+  color: #cbd5e1;
+}
+
+.star-rating-score {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--color-text-main);
+  margin-left: 0.35rem;
+}
+
+/* ==========================================================================
+   Grid & Layout Utilities
+   ========================================================================== */
+.grid {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.grid-cols-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.grid-cols-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 900px) {
+  .grid-cols-3 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .grid-cols-2,
+  .grid-cols-3 {
+    grid-template-columns: 1fr;
+  }
+  
+  .navbar-container {
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  
+  .navbar-links {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.5rem;
+  }
+}
+
+/* Footer Styles */
+.footer {
+  background-color: var(--color-surface);
+  border-top: 1px solid var(--color-border);
+  padding: 1.5rem;
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  margin-top: auto;
+}
