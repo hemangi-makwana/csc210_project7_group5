@@ -84,9 +84,9 @@ export function DemoBanner({ isDemo = true }) {
 
   return (
     <div className="demo-banner">
-      <span className="demo-banner-badge">Demo Mode</span>
+      <span className="demo-banner-badge">Offline Mode</span>
       <span>
-        <strong>Backend Offline:</strong> Displaying simulated local data for live demonstration.
+        <strong>Backend Offline:</strong> Displaying simulated local data.
       </span>
     </div>
   );

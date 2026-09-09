@@ -48,9 +48,9 @@ export function Login() {
   /**
    * Helper function to pre-fill credentials for quick live demonstration during viva.
    */
-  function handleQuickFill(demoEmail, demoPassword) {
-    setEmail(demoEmail);
-    setPassword(demoPassword);
+  function handleQuickFill(fillEmail, fillPassword) {
+    setEmail(fillEmail);
+    setPassword(fillPassword);
     setErrorMessage(null);
   }
 
@@ -108,7 +108,7 @@ export function Login() {
           </button>
         </form>
 
-        {/* Viva Quick-Fill Helpers for Demonstrations */}
+        {/* Quick Access Account Helpers */}
         <div style={{
           marginTop: '1.75rem',
           paddingTop: '1.25rem',
@@ -116,7 +116,7 @@ export function Login() {
           textAlign: 'center'
         }}>
           <p style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', marginBottom: '0.75rem', fontWeight: '600', textTransform: 'uppercase' }}>
-            ⚡ 1-Click Demo Accounts (Viva Testing):
+            Quick access:
           </p>
 
           <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'center', flexWrap: 'wrap' }}>
