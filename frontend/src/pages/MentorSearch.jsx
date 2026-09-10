@@ -40,8 +40,8 @@ export function MentorSearch() {
     try {
       const response = await searchMentorsBySkill(query);
 
-      // Extract results array and detect if demo mock data was served
-      const results = response.results || [];
+      // Extract mentors array and detect if demo mock data was served
+      const results = response.mentors || [];
       setMentorList(results);
       setIsDemo(!!response.isMock);
     } catch (error) {

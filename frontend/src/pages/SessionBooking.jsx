@@ -52,7 +52,7 @@ export function SessionBooking() {
       setIsFetchingMentors(true);
       try {
         const response = await searchMentorsBySkill('');
-        const results = response.results || [];
+        const results = response.mentors || response.results || [];
         setAvailableMentors(results.map(r => r.user || r));
         if (response.isMock) setIsDemo(true);
       } catch (err) {

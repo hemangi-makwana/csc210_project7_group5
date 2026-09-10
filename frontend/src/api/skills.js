@@ -18,7 +18,7 @@ import { request } from './client.js';
 /**
  * Searches for mentors teaching a specific skill keyword.
  * @param {string} query - Keyword such as "Python", "React", or "Data Science".
- * @returns {Promise<{results: Array, isMock?: boolean}>}
+ * @returns {Promise<{mentors: Array, isMock?: boolean}>}
  */
 export async function searchMentorsBySkill(query) {
   const encodedQuery = encodeURIComponent(query || '');

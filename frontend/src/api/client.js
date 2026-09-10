@@ -151,6 +151,7 @@ function handleMockFallback(endpoint, options = {}) {
       }));
 
     return {
+      mentors: matchingMentors,
       results: matchingMentors,
       isMock: true,
     };

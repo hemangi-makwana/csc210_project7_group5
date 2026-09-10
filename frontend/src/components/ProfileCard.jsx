@@ -29,9 +29,9 @@ function getRoleBadgeClass(role) {
 export function ProfileCard({ user, matchScore = null, matchReason = null }) {
   if (!user) return null;
 
-  // Separate taught skills and wanted skills
-  const taughtSkills = (user.skills || []).filter(s => s.type === 'teach');
-  const wantedSkills = (user.skills || []).filter(s => s.type === 'learn');
+  // Separate taught skills and wanted skills (supports both object and string format)
+  const taughtSkills = (user.skills || []).filter(s => typeof s === 'string' || s.type === 'teach');
+  const wantedSkills = (user.skills || []).filter(s => typeof s !== 'string' && s.type === 'learn');
 
   return (
     <div className="card" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -42,13 +42,13 @@ export function ProfileCard({ user, matchScore = null, matchReason = null }) {
             {user.name}
           </h3>
           <span className={`badge ${getRoleBadgeClass(user.role)}`} style={{ marginTop: '0.25rem' }}>
-            {user.role || 'Member'}
+            {user.role || 'Peer Mentor'}
           </span>
         </div>
 
         {/* Reputation Rating */}
         <div>
-          <StarRating rating={user.reputation_score || 5.0} />
+          <StarRating rating={user.reputation_score || user.reputationScore || 5.0} />
         </div>
       </div>
 
@@ -90,12 +90,16 @@ export function ProfileCard({ user, matchScore = null, matchReason = null }) {
         </span>
         <div className="chip-container">
           {taughtSkills.length > 0 ? (
-            taughtSkills.map((skill, index) => (
-              <span key={skill.id || index} className="chip">
-                {skill.skill_name}
-                {skill.level && <span className="chip-level">{skill.level}</span>}
-              </span>
-            ))
+            taughtSkills.map((skill, index) => {
+              const skillName = typeof skill === 'string' ? skill : skill.skill_name;
+              const skillLevel = typeof skill === 'string' ? user.level : skill.level;
+              return (
+                <span key={skill.id || index} className="chip">
+                  {skillName}
+                  {skillLevel && <span className="chip-level">{skillLevel}</span>}
+                </span>
+              );
+            })
           ) : (
             <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>No taught skills listed</span>
           )}
