@@ -61,6 +61,87 @@ const bookingQueue = new Queue();
 // SEED DATA POPULATION
 // ----------------------------------------------------------------------------
 
+// Complete list of mock users/mentors seeded into memory
+const seedUsers = [
+  {
+    userId: "user_1",
+    name: "Alice Chen",
+    role: "professional",
+    skills: ["Python", "Web Design"],
+    reputationScore: 4.9,
+    skillEntries: [
+      { skillName: "Python", level: "expert" },
+      { skillName: "Web Design", level: "intermediate" },
+    ],
+  },
+  {
+    userId: "user_2",
+    name: "Bob Smith",
+    role: "student",
+    skills: ["Python", "Guitar"],
+    reputationScore: 4.5,
+    skillEntries: [
+      { skillName: "Python", level: "intermediate" },
+      { skillName: "Guitar", level: "beginner" },
+    ],
+  },
+  {
+    userId: "user_3",
+    name: "Clara Garcia",
+    role: "volunteer",
+    skills: ["Python", "Public Speaking"],
+    reputationScore: 4.7,
+    skillEntries: [
+      { skillName: "Python", level: "beginner" },
+      { skillName: "Public Speaking", level: "expert" },
+    ],
+  },
+  {
+    userId: "user_4",
+    name: "David Kim",
+    role: "professional",
+    skills: ["Guitar", "Public Speaking"],
+    reputationScore: 4.8,
+    skillEntries: [
+      { skillName: "Guitar", level: "expert" },
+      { skillName: "Public Speaking", level: "intermediate" },
+    ],
+  },
+  {
+    userId: "user_5",
+    name: "Elena Rostova",
+    role: "professional",
+    skills: ["Python", "Web Design"],
+    reputationScore: 5.0,
+    skillEntries: [
+      { skillName: "Python", level: "expert" },
+      { skillName: "Web Design", level: "expert" },
+    ],
+  },
+  {
+    userId: "user_6",
+    name: "Farhan Ali",
+    role: "student",
+    skills: ["Guitar", "Public Speaking"],
+    reputationScore: 4.3,
+    skillEntries: [
+      { skillName: "Guitar", level: "intermediate" },
+      { skillName: "Public Speaking", level: "beginner" },
+    ],
+  },
+  {
+    userId: "user_7",
+    name: "Grace Hopper",
+    role: "volunteer",
+    skills: ["Web Design", "Public Speaking"],
+    reputationScore: 4.9,
+    skillEntries: [
+      { skillName: "Web Design", level: "intermediate" },
+      { skillName: "Public Speaking", level: "intermediate" },
+    ],
+  },
+];
+
 /**
  * Inserts 7 diverse fake mentors into the Hash Table on server startup.
  *
@@ -74,79 +155,6 @@ const bookingQueue = new Queue();
  * allows the frontend to perform real searches and return varied, meaningful results.
  */
 function seedDatabase() {
-  const seedUsers = [
-    {
-      userId: "user_1",
-      name: "Alice Chen",
-      skills: ["Python", "Web Design"],
-      reputationScore: 4.9,
-      skillEntries: [
-        { skillName: "Python", level: "expert" },
-        { skillName: "Web Design", level: "intermediate" },
-      ],
-    },
-    {
-      userId: "user_2",
-      name: "Bob Smith",
-      skills: ["Python", "Guitar"],
-      reputationScore: 4.5,
-      skillEntries: [
-        { skillName: "Python", level: "intermediate" },
-        { skillName: "Guitar", level: "beginner" },
-      ],
-    },
-    {
-      userId: "user_3",
-      name: "Clara Garcia",
-      skills: ["Python", "Public Speaking"],
-      reputationScore: 4.7,
-      skillEntries: [
-        { skillName: "Python", level: "beginner" },
-        { skillName: "Public Speaking", level: "expert" },
-      ],
-    },
-    {
-      userId: "user_4",
-      name: "David Kim",
-      skills: ["Guitar", "Public Speaking"],
-      reputationScore: 4.8,
-      skillEntries: [
-        { skillName: "Guitar", level: "expert" },
-        { skillName: "Public Speaking", level: "intermediate" },
-      ],
-    },
-    {
-      userId: "user_5",
-      name: "Elena Rostova",
-      skills: ["Python", "Web Design"],
-      reputationScore: 5.0,
-      skillEntries: [
-        { skillName: "Python", level: "expert" },
-        { skillName: "Web Design", level: "expert" },
-      ],
-    },
-    {
-      userId: "user_6",
-      name: "Farhan Ali",
-      skills: ["Guitar", "Public Speaking"],
-      reputationScore: 4.3,
-      skillEntries: [
-        { skillName: "Guitar", level: "intermediate" },
-        { skillName: "Public Speaking", level: "beginner" },
-      ],
-    },
-    {
-      userId: "user_7",
-      name: "Grace Hopper",
-      skills: ["Web Design", "Public Speaking"],
-      reputationScore: 4.9,
-      skillEntries: [
-        { skillName: "Web Design", level: "intermediate" },
-        { skillName: "Public Speaking", level: "intermediate" },
-      ],
-    },
-  ];
-
   // Insert each user into the hash table under each skill they teach
   for (let userIndex = 0; userIndex < seedUsers.length; userIndex++) {
     const user = seedUsers[userIndex];
@@ -305,6 +313,48 @@ application.post("/api/sessions/book", (request, response) => {
   }
 });
 
+/**
+ * ENDPOINT 3: GET /api/users/all
+ *
+ * WHAT IT DOES:
+ * Returns the entire catalog of all seeded mentors in the community, regardless of skill.
+ *
+ * WHY A SEPARATE "GET ALL" ENDPOINT? (VIVA DEFENSE POINT):
+ * In RESTful API design, each endpoint should have a clear, single responsibility:
+ * 1. GET /api/skills/search?query=<term> is designed specifically to FILTER mentors
+ *    by a skill keyword using our Hash Table index in O(1) average time.
+ *    An empty search query (?query=) should NOT silently return all records:
+ *    empty search parameters are not valid skill names, and returning everything
+ *    violates what "searching" means.
+ * 2. GET /api/users/all is designed specifically to RETRIEVE THE FULL DIRECTORY.
+ *    For UI elements like the "Select Mentor" dropdown in session booking, the user
+ *    needs to see all available mentors in the community regardless of what skills
+ *    they teach. Keeping this as a distinct endpoint provides clean separation of
+ *    concerns and prevents unexpected side effects.
+ */
+application.get("/api/users/all", (request, response) => {
+  try {
+    const mentorList = seedUsers.map((user) => ({
+      id: user.userId,
+      userId: user.userId,
+      name: user.name,
+      role: user.role || "Peer Mentor",
+      skills: user.skills,
+      reputationScore: user.reputationScore,
+    }));
+
+    return response.status(200).json({
+      mentors: mentorList,
+      users: mentorList,
+    });
+  } catch (error) {
+    console.error("Error retrieving all mentors:", error);
+    return response.status(500).json({
+      error: "An internal server error occurred while retrieving mentors.",
+    });
+  }
+});
+
 // Root endpoint for quick health check
 application.get("/", (request, response) => {
   return response.json({
@@ -325,8 +375,10 @@ if (require.main === module) {
 // Export modules for testing purposes
 module.exports = {
   application,
+  seedUsers,
   skillHashTable,
   bookingQueue,
   seedDatabase,
   sortMentorsByLevel,
 };
+

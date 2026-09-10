@@ -28,6 +28,18 @@ export async function searchMentorsBySkill(query) {
 }
 
 /**
+ * Retrieves all available mentors across the community regardless of skill.
+ * Used for populating mentor dropdown selectors (such as session booking).
+ *
+ * @returns {Promise<{mentors: Array, isMock?: boolean}>}
+ */
+export async function getAllMentors() {
+  return await request('/users/all', {
+    method: 'GET',
+  });
+}
+
+/**
  * Retrieves a user's full profile and associated skills.
  * @param {string} userId - User's ID.
  * @returns {Promise<object>}

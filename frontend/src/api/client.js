@@ -157,6 +157,15 @@ function handleMockFallback(endpoint, options = {}) {
     };
   }
 
+  // 3b. Retrieve All Mentors: /users/all
+  if (path === '/users/all' && method === 'GET') {
+    return {
+      mentors: MOCK_DATA.users,
+      users: MOCK_DATA.users,
+      isMock: true,
+    };
+  }
+
   // 4. Recommendation Engine: /recommendations/:userId
   if (path.startsWith('/recommendations/') && method === 'GET') {
     const recommendations = MOCK_DATA.users.map((mentor, index) => ({

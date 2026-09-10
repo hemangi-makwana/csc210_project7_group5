@@ -17,7 +17,7 @@ import React, { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { bookSession } from '../api/sessions.js';
-import { searchMentorsBySkill } from '../api/skills.js';
+import { getAllMentors } from '../api/skills.js';
 import { Loader, ErrorState, SuccessState, DemoBanner } from '../components/Feedback.jsx';
 
 export function SessionBooking() {
@@ -46,13 +46,21 @@ export function SessionBooking() {
 
   /**
    * Fetches available mentors for the dropdown selector on initial render.
+   *
+   * WHY WE USE A SEPARATE "GET ALL" ENDPOINT (VIVA DEFENSE POINT):
+   * In RESTful API architecture, searching for a specific skill keyword (/api/skills/search?query=...)
+   * is fundamentally different from fetching the full community mentor directory (/api/users/all).
+   * Relying on an empty search query to silently return all records is an antipattern:
+   * empty parameters shouldn't secretly act as a wildcard, as that violates what "searching for
+   * a skill" means and makes system behavior unpredictable. A dedicated endpoint makes our intent
+   * explicit and maintains clean separation of concerns.
    */
   useEffect(() => {
     async function loadMentors() {
       setIsFetchingMentors(true);
       try {
-        const response = await searchMentorsBySkill('');
-        const results = response.mentors || response.results || [];
+        const response = await getAllMentors();
+        const results = response.mentors || response.users || response.results || [];
         setAvailableMentors(results.map(r => r.user || r));
         if (response.isMock) setIsDemo(true);
       } catch (err) {
