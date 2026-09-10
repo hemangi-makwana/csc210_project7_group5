@@ -80,8 +80,10 @@ export function LearningHistory() {
     setErrorMessage(null);
 
     try {
+      // NOTE: Standardized on camelCase for all API payload fields (see sessions.js).
+      // Using snake_case (session_id) here would cause the backend to reject or misread the field.
       const payload = {
-        session_id: reviewingSessionId,
+        sessionId: reviewingSessionId,
         rating: reviewRating,
         comment: reviewComment,
       };

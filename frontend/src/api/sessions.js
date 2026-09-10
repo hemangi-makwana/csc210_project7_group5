@@ -16,7 +16,14 @@ import { request } from './client.js';
 
 /**
  * Enqueues a new session booking request.
- * @param {object} bookingData - { mentor_id, learner_id, scheduled_at, notes }
+ *
+ * CAMELCASE STANDARDIZATION (VIVA DEFENSE POINT):
+ * All API payloads in this codebase use camelCase field names (e.g. mentorId, scheduledAt).
+ * This matches JavaScript and JSON conventions and keeps the frontend and backend consistent.
+ * Using snake_case (mentor_id, scheduled_at) on either side causes a field mismatch:
+ * the backend would receive the field as 'undefined' and return a 400 Bad Request error.
+ *
+ * @param {object} bookingData - { mentorId, learnerId, scheduledAt, topic, notes }
  * @returns {Promise<{session: object, message: string, isMock?: boolean}>}
  */
 export async function bookSession(bookingData) {
@@ -39,7 +46,7 @@ export async function getUserSessions(userId) {
 
 /**
  * Submits a rating and written review for a completed session.
- * @param {object} reviewData - { session_id, rating, comment }
+ * @param {object} reviewData - { sessionId, rating, comment }
  * @returns {Promise<{review: object, message: string, isMock?: boolean}>}
  */
 export async function submitSessionReview(reviewData) {

@@ -100,11 +100,14 @@ export function SessionBooking() {
     setIsLoading(true);
 
     try {
+      // NOTE: All API payloads in this project use camelCase field names.
+      // The backend (POST /api/sessions/book) destructures { mentorId, learnerId, scheduledAt }
+      // from req.body — sending snake_case (mentor_id etc.) would trigger a 400 error.
       const payload = {
-        mentor_id: mentorId,
-        learner_id: learnerId,
+        mentorId: mentorId,
+        learnerId: learnerId,
         topic: sessionTopic,
-        scheduled_at: scheduledDateTime,
+        scheduledAt: scheduledDateTime,
         notes: sessionNotes,
       };
 
