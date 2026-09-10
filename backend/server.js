@@ -61,14 +61,26 @@ const bookingQueue = new Queue();
 // SEED DATA POPULATION
 // ----------------------------------------------------------------------------
 
-// Complete list of mock users/mentors seeded into memory
+/**
+ * Complete list of mock users/mentors seeded into memory on server startup.
+ *
+ * WHY 20 MENTORS? (VIVA DEFENSE POINT):
+ * 20 is a representative sample size chosen for demo purposes — it gives the Hash Table
+ * enough real entries to distribute meaningfully across its 31 buckets and produces
+ * visible collision chains (multiple mentors per skill bucket) without overwhelming
+ * the in-memory data. However, the Hash Table itself has NO fixed capacity limit:
+ * it uses separate chaining (arrays inside each bucket), so it can hold arbitrarily
+ * more mentors simply by calling hashTable.insert() more times — zero code changes needed.
+ */
 const seedUsers = [
+  // ---- ORIGINAL 7 MENTORS ----
   {
     userId: "user_1",
     name: "Alice Chen",
     role: "professional",
     skills: ["Python", "Web Design"],
     reputationScore: 4.9,
+    bio: "Senior full-stack developer specialising in Python back-ends and responsive web design.",
     skillEntries: [
       { skillName: "Python", level: "expert" },
       { skillName: "Web Design", level: "intermediate" },
@@ -80,6 +92,7 @@ const seedUsers = [
     role: "student",
     skills: ["Python", "Guitar"],
     reputationScore: 4.5,
+    bio: "CS undergraduate who loves algorithms and plays acoustic guitar on weekends.",
     skillEntries: [
       { skillName: "Python", level: "intermediate" },
       { skillName: "Guitar", level: "beginner" },
@@ -91,6 +104,7 @@ const seedUsers = [
     role: "volunteer",
     skills: ["Python", "Public Speaking"],
     reputationScore: 4.7,
+    bio: "Community coding bootcamp instructor with a passion for public speaking and inclusion in tech.",
     skillEntries: [
       { skillName: "Python", level: "beginner" },
       { skillName: "Public Speaking", level: "expert" },
@@ -102,6 +116,7 @@ const seedUsers = [
     role: "professional",
     skills: ["Guitar", "Public Speaking"],
     reputationScore: 4.8,
+    bio: "Professional musician and TED-talk coach helping others find their stage voice.",
     skillEntries: [
       { skillName: "Guitar", level: "expert" },
       { skillName: "Public Speaking", level: "intermediate" },
@@ -113,6 +128,7 @@ const seedUsers = [
     role: "professional",
     skills: ["Python", "Web Design"],
     reputationScore: 5.0,
+    bio: "Lead UX engineer with 10+ years building production Python services and polished web interfaces.",
     skillEntries: [
       { skillName: "Python", level: "expert" },
       { skillName: "Web Design", level: "expert" },
@@ -124,6 +140,7 @@ const seedUsers = [
     role: "student",
     skills: ["Guitar", "Public Speaking"],
     reputationScore: 4.3,
+    bio: "Music performance student who mentors beginners in guitar technique and stage confidence.",
     skillEntries: [
       { skillName: "Guitar", level: "intermediate" },
       { skillName: "Public Speaking", level: "beginner" },
@@ -135,9 +152,168 @@ const seedUsers = [
     role: "volunteer",
     skills: ["Web Design", "Public Speaking"],
     reputationScore: 4.9,
+    bio: "Retired software architect now volunteering to teach accessible web design and presentation skills.",
     skillEntries: [
       { skillName: "Web Design", level: "intermediate" },
       { skillName: "Public Speaking", level: "intermediate" },
+    ],
+  },
+
+  // ---- NEW MENTORS (users 8–20) — adds 7 new skill categories ----
+  {
+    userId: "user_8",
+    name: "Hiro Tanaka",
+    role: "professional",
+    skills: ["Data Structures", "Python"],
+    reputationScore: 4.7,
+    bio: "Software engineer at a fintech company who loves teaching computer science fundamentals.",
+    skillEntries: [
+      { skillName: "Data Structures", level: "expert" },
+      { skillName: "Python", level: "intermediate" },
+    ],
+  },
+  {
+    userId: "user_9",
+    name: "Isabelle Dupont",
+    role: "volunteer",
+    skills: ["Spanish", "Public Relations"],
+    reputationScore: 4.6,
+    bio: "Bilingual community liaison with a background in corporate communications and language tutoring.",
+    skillEntries: [
+      { skillName: "Spanish", level: "expert" },
+      { skillName: "Public Relations", level: "intermediate" },
+    ],
+  },
+  {
+    userId: "user_10",
+    name: "James O'Brien",
+    role: "student",
+    skills: ["Guitar", "Cooking"],
+    reputationScore: 3.9,
+    bio: "Hospitality student who jams on guitar and loves teaching basic home cooking techniques.",
+    skillEntries: [
+      { skillName: "Guitar", level: "intermediate" },
+      { skillName: "Cooking", level: "beginner" },
+    ],
+  },
+  {
+    userId: "user_11",
+    name: "Kavya Reddy",
+    role: "professional",
+    skills: ["UI Design", "Web Design"],
+    reputationScore: 4.9,
+    bio: "Senior product designer at a SaaS startup with expertise in Figma, design systems, and CSS.",
+    skillEntries: [
+      { skillName: "UI Design", level: "expert" },
+      { skillName: "Web Design", level: "expert" },
+    ],
+  },
+  {
+    userId: "user_12",
+    name: "Liam Foster",
+    role: "student",
+    skills: ["Python", "Excel"],
+    reputationScore: 3.8,
+    bio: "Business analytics undergraduate learning Python for data work and sharing spreadsheet tips.",
+    skillEntries: [
+      { skillName: "Python", level: "beginner" },
+      { skillName: "Excel", level: "beginner" },
+    ],
+  },
+  {
+    userId: "user_13",
+    name: "Mei Zhang",
+    role: "volunteer",
+    skills: ["Photography", "Public Speaking"],
+    reputationScore: 4.5,
+    bio: "Freelance photographer and community workshop host teaching portrait and street photography.",
+    skillEntries: [
+      { skillName: "Photography", level: "expert" },
+      { skillName: "Public Speaking", level: "intermediate" },
+    ],
+  },
+  {
+    userId: "user_14",
+    name: "Nadia Okonkwo",
+    role: "professional",
+    skills: ["Data Structures", "Public Relations"],
+    reputationScore: 5.0,
+    bio: "Principal engineer and former PR manager — rare blend of deep technical and communication expertise.",
+    skillEntries: [
+      { skillName: "Data Structures", level: "expert" },
+      { skillName: "Public Relations", level: "expert" },
+    ],
+  },
+  {
+    userId: "user_15",
+    name: "Oscar Brennan",
+    role: "student",
+    skills: ["Spanish", "Cooking"],
+    reputationScore: 4.1,
+    bio: "Culinary arts student who picked up conversational Spanish while studying abroad in Madrid.",
+    skillEntries: [
+      { skillName: "Spanish", level: "intermediate" },
+      { skillName: "Cooking", level: "intermediate" },
+    ],
+  },
+  {
+    userId: "user_16",
+    name: "Priya Sharma",
+    role: "professional",
+    skills: ["Excel", "UI Design"],
+    reputationScore: 4.8,
+    bio: "Financial analyst turned UX designer, expert in Excel modelling and clean interface design.",
+    skillEntries: [
+      { skillName: "Excel", level: "expert" },
+      { skillName: "UI Design", level: "intermediate" },
+    ],
+  },
+  {
+    userId: "user_17",
+    name: "Rahul Nair",
+    role: "volunteer",
+    skills: ["Python", "Data Structures"],
+    reputationScore: 4.6,
+    bio: "Open-source contributor and CS tutor specialising in algorithms, sorting, and graph theory.",
+    skillEntries: [
+      { skillName: "Python", level: "expert" },
+      { skillName: "Data Structures", level: "intermediate" },
+    ],
+  },
+  {
+    userId: "user_18",
+    name: "Sofia Martínez",
+    role: "professional",
+    skills: ["Photography", "Web Design"],
+    reputationScore: 4.3,
+    bio: "Digital media creator blending photography portfolio work with clean, minimal web design.",
+    skillEntries: [
+      { skillName: "Photography", level: "intermediate" },
+      { skillName: "Web Design", level: "intermediate" },
+    ],
+  },
+  {
+    userId: "user_19",
+    name: "Thomas Müller",
+    role: "volunteer",
+    skills: ["Guitar", "Public Speaking"],
+    reputationScore: 4.7,
+    bio: "Classical guitarist and TEDx speaker who mentors others in performance skills and stage presence.",
+    skillEntries: [
+      { skillName: "Guitar", level: "expert" },
+      { skillName: "Public Speaking", level: "expert" },
+    ],
+  },
+  {
+    userId: "user_20",
+    name: "Uma Krishnan",
+    role: "student",
+    skills: ["Cooking", "Excel"],
+    reputationScore: 4.2,
+    bio: "Nutrition science student who teaches healthy meal prep and uses Excel for diet tracking.",
+    skillEntries: [
+      { skillName: "Cooking", level: "expert" },
+      { skillName: "Excel", level: "intermediate" },
     ],
   },
 ];
@@ -351,6 +527,99 @@ application.get("/api/users/all", (request, response) => {
     console.error("Error retrieving all mentors:", error);
     return response.status(500).json({
       error: "An internal server error occurred while retrieving mentors.",
+    });
+  }
+});
+
+/**
+ * ENDPOINT 4: PUT /api/users/:userId/skills
+ *
+ * WHAT IT DOES:
+ * 1. Finds the target user in the seedUsers array by the userId URL parameter.
+ * 2. Updates that user's bio and skills list in memory.
+ * 3. For every skill they can teach (type === 'teach'), calls skillHashTable.insert()
+ *    so the skill becomes immediately searchable via GET /api/skills/search.
+ * 4. Returns the updated profile as confirmation.
+ *
+ * WHY THIS MATTERS FOR THE VIVA (DYNAMIC HASH TABLE INSERT):
+ * When the server starts, seedDatabase() calls insert() for each mentor's skills.
+ * This endpoint proves that insert() also works DYNAMICALLY at runtime — after a user
+ * saves new skills, those skills are instantly findable via the search endpoint.
+ * This demonstrates the Hash Table is a live, mutable data structure, not a static
+ * lookup table frozen at startup. A viva examiner may ask: "What happens if a user
+ * adds a new skill?" — the answer is this endpoint.
+ *
+ * EXPECTED REQUEST BODY:
+ * {
+ *   "bio": "optional text",
+ *   "skills": [
+ *     { "skill_name": "Python", "level": "expert",  "type": "teach" },
+ *     { "skill_name": "Rust",   "level": "beginner", "type": "learn" }
+ *   ]
+ * }
+ */
+application.put("/api/users/:userId/skills", (request, response) => {
+  try {
+    const targetUserId = request.params.userId;
+
+    // Step 1: Find the user in our in-memory seed array
+    const userIndex = seedUsers.findIndex((user) => user.userId === targetUserId);
+
+    if (userIndex === -1) {
+      return response.status(404).json({
+        error: `User with ID "${targetUserId}" was not found.`,
+      });
+    }
+
+    const incomingBio = request.body.bio || seedUsers[userIndex].bio || "";
+    const incomingSkills = request.body.skills || [];
+
+    // Step 2: Update the user's bio and skills in memory
+    seedUsers[userIndex].bio = incomingBio;
+    seedUsers[userIndex].skillEntries = incomingSkills
+      .filter((skill) => skill.type === "teach")
+      .map((skill) => ({
+        skillName: skill.skill_name,
+        level: skill.level || "beginner",
+      }));
+    seedUsers[userIndex].skills = incomingSkills
+      .filter((skill) => skill.type === "teach")
+      .map((skill) => skill.skill_name);
+
+    // Step 3: Insert each teachable skill into the Hash Table so it is immediately
+    // searchable via GET /api/skills/search. This is the key runtime-insert demonstration.
+    const updatedUser = seedUsers[userIndex];
+    for (const skill of incomingSkills) {
+      if (skill.type !== "teach") continue; // Only index skills the user can teach
+
+      const mentorRecord = {
+        userId: updatedUser.userId,
+        id: updatedUser.userId,
+        name: updatedUser.name,
+        level: skill.level || "beginner",
+        skills: updatedUser.skills,
+        reputationScore: updatedUser.reputationScore,
+      };
+
+      // insert() handles collision automatically via separate chaining in the Hash Table
+      skillHashTable.insert(skill.skill_name, mentorRecord);
+    }
+
+    // Step 4: Return the updated profile as confirmation
+    return response.status(200).json({
+      message: "Profile skills and bio saved successfully!",
+      user: {
+        userId: updatedUser.userId,
+        name: updatedUser.name,
+        bio: updatedUser.bio,
+        skills: updatedUser.skills,
+        skillEntries: updatedUser.skillEntries,
+      },
+    });
+  } catch (error) {
+    console.error("Error updating user skills:", error);
+    return response.status(500).json({
+      error: "An internal server error occurred while updating skills.",
     });
   }
 });

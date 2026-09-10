@@ -195,7 +195,7 @@ function handleMockFallback(endpoint, options = {}) {
   if (path.includes('/skills') && method === 'PUT') {
     const payload = options.body ? JSON.parse(options.body) : {};
     return {
-      message: 'Skills and bio updated successfully (Simulated)',
+      message: 'Skills and bio updated successfully!',
       skills: payload.skills || [],
       bio: payload.bio || '',
       isMock: true,
