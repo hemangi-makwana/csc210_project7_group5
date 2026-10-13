@@ -17,7 +17,7 @@
  * WHY THE `pg` DRIVER:
  * - Our backend is a long-running Node.js/Express process, so the standard
  *   node-postgres driver (`pg`) with a connection pool is the recommended
- *   choice (Neon skill guidance: use `pg` for a classic Node runtime).
+ *   choice for this kind of server.
  * - A Pool keeps several connections ready, so every request does not pay
  *   the cost of opening a new TCP connection to the database.
  *
@@ -36,9 +36,10 @@ const { Pool } = require("pg");
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // Neon requires an encrypted connection; the pooled connection string
-  // terminates TLS on Neon's side.
-  ssl: { rejectUnauthorized: false },
+  // Encrypt the database connection with TLS and also verify Neon's
+  // server certificate, so the password cannot be intercepted or the
+  // connection silently redirected to a fake server (man-in-the-middle).
+  ssl: true,
 });
 
 /**

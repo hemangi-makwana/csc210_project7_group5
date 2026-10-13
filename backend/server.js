@@ -328,8 +328,10 @@ const seedUsers = [
  * (beginner, intermediate, expert).
  *
  * WHY WE DO THIS:
- * Since we do not have a live database connected yet, seeding fake data into memory
- * allows the frontend to perform real searches and return varied, meaningful results.
+ * The database connection is live, but its tables are still being built out.
+ * Seeding realistic mock data into memory gives the frontend varied, meaningful
+ * search results in the meantime, and the seed records will later be
+ * migrated into PostgreSQL.
  */
 function seedDatabase() {
   // Insert each user into the hash table under each skill they teach
