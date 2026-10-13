@@ -5,3 +5,5 @@ dist/
 coverage/
 .neon
 .env.local
+.agents/
+.logs/
