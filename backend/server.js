@@ -36,6 +36,7 @@ const express = require("express");
 const cors = require("cors");
 const HashTable = require("./dsa/hashTable");
 const Queue = require("./dsa/queue");
+const { checkConnection } = require("./db");
 
 // Create the Express application instance
 const application = express();
@@ -630,6 +631,32 @@ application.get("/", (request, response) => {
     status: "online",
     message: "Local Skill Exchange Backend API & DSA Engine is running!",
   });
+});
+
+/**
+ * DATABASE HEALTH ENDPOINT: GET /api/health/db
+ *
+ * Proves the backend can reach our Neon PostgreSQL database end-to-end.
+ * Used to verify the database integration after provisioning.
+ */
+application.get("/api/health/db", async (request, response) => {
+  try {
+    const health = await checkConnection();
+    return response.status(200).json({
+      status: "ok",
+      database: health.reachable ? "connected" : "unreachable",
+      serverTime: health.serverTime,
+      latencyMs: health.latencyMs,
+      postgresVersion: health.version,
+    });
+  } catch (error) {
+    console.error("Database health check failed:", error);
+    return response.status(500).json({
+      status: "error",
+      database: "unreachable",
+      error: error.message,
+    });
+  }
 });
 
 // ----------------------------------------------------------------------------
