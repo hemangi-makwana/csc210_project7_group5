@@ -38,6 +38,8 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const HashTable = require("./dsa/hashTable");
 const Queue = require("./dsa/queue");
+const Graph = require("./dsa/graph");
+const MaxHeap = require("./dsa/heap");
 const { pool, query, checkConnection, isPoolInitialized } = require("./db/index");
 const { setupDatabase } = require("./db/setup");
 
@@ -171,6 +173,9 @@ const skillHashTable = new HashTable(31);
 
 // FIFO Queue for processing mentor session bookings in the order received
 const bookingQueue = new Queue();
+
+// Adjacency List Graph for modeling learner-mentor relationships and community proximity
+const mentorGraph = new Graph();
 
 // ----------------------------------------------------------------------------
 // SEED DATA POPULATION & POSTGRESQL SYNCHRONIZATION
@@ -434,12 +439,23 @@ const seedUsers = [
 ];
 
 /**
- * Inserts seed users into the Hash Table.
+ * Inserts seed users into the Hash Table and primes the Graph network.
  * Used as a fallback when local PostgreSQL is not running or during initial offline boot.
  */
 function seedDatabase() {
+  // Clear any existing in-memory entries for deterministic re-seeding
+  mentorGraph.clear();
+
   for (let userIndex = 0; userIndex < seedUsers.length; userIndex++) {
     const user = seedUsers[userIndex];
+
+    // Add vertex to Graph
+    mentorGraph.addVertex(user.userId, {
+      name: user.name,
+      role: user.role,
+      skills: user.skills,
+      reputationScore: user.reputationScore,
+    });
 
     for (let skillIndex = 0; skillIndex < user.skillEntries.length; skillIndex++) {
       const skillEntry = user.skillEntries[skillIndex];
@@ -456,15 +472,45 @@ function seedDatabase() {
       skillHashTable.insert(skillEntry.skillName, mentorRecord);
     }
   }
+
+  // Build representative community graph connections among seed users
+  // (Models mentor-learner sessions and peer collaborations across skill domains)
+  const peerConnections = [
+    ["user_1", "user_2", 4.8],  // Python cohort peers
+    ["user_1", "user_5", 5.0],  // Full-stack / UX collaboration
+    ["user_2", "user_3", 4.2],  // Music / Creative arts peers
+    ["user_3", "user_4", 4.5],  // Digital Arts / Design circle
+    ["user_4", "user_5", 4.9],  // UI / Frontend design
+    ["user_5", "user_7", 4.7],  // Web architecture collaboration
+    ["user_6", "user_2", 4.4],  // Acoustic guitar peers
+    ["user_7", "user_14", 5.0], // Engineering leadership
+    ["user_8", "user_1", 4.9],  // Python CS fundamentals
+    ["user_8", "user_14", 4.8], // Data structures peer circle
+    ["user_9", "user_15", 4.6], // Conversational Spanish peers
+    ["user_10", "user_6", 4.3], // Guitar & music student group
+    ["user_11", "user_4", 4.9], // Figma & Product design
+    ["user_11", "user_16", 4.8], // UI / UX designers
+    ["user_12", "user_16", 4.1], // Analytics & Excel modeling
+    ["user_13", "user_3", 4.7], // Photography & creative arts
+    ["user_17", "user_7", 4.9], // Public speaking workshop
+    ["user_18", "user_10", 4.5], // Culinary arts peer circle
+    ["user_19", "user_8", 4.6], // CS & Data structures
+    ["user_20", "user_12", 4.3], // Excel spreadsheets
+  ];
+
+  for (const [u1, u2, weight] of peerConnections) {
+    mentorGraph.addEdge(u1, u2, weight, "mentorship", true);
+  }
 }
 
 /**
  * Connects to local PostgreSQL, ensures tables exist, seeds initial mentors if empty,
- * and loads mentor skills from PostgreSQL into the in-memory Hash Table.
+ * and loads mentor skills and network connections from PostgreSQL into the in-memory
+ * Hash Table and Graph.
  *
  * ARCHITECTURAL PRINCIPLE:
- * PostgreSQL is the true persistent source of truth. The Hash Table serves as the
- * fast, in-memory O(1) algorithmic index primed directly from PostgreSQL data.
+ * PostgreSQL is the true persistent source of truth. The Hash Table and Graph serve as
+ * the fast, in-memory algorithmic indexes primed directly from PostgreSQL data.
  */
 async function initializeDatabaseAndDsa() {
   try {
@@ -476,10 +522,7 @@ async function initializeDatabaseAndDsa() {
       // Ensure schema tables exist (safe and idempotent)
       await setupDatabase(false);
 
-      // Note: Sample mentors and bookings are optional and NOT inserted automatically.
-      // To seed optional sample data, run: npm run db:seed
-
-      // Query mentors and skills directly from PostgreSQL to populate Hash Table
+      // Query mentors and skills directly from PostgreSQL to populate Hash Table & Graph
       const result = await query(`
         SELECT u.id, u.name, u.role, u.bio, u.reputation_score,
                s.skill_name, s.level,
@@ -492,6 +535,40 @@ async function initializeDatabaseAndDsa() {
         WHERE s.type = 'teach'
         ORDER BY u.id
       `);
+
+      // Populate user vertices in Graph
+      const allUsersRes = await query(`SELECT id, name, role, reputation_score FROM users`);
+      if (allUsersRes.rows) {
+        for (const u of allUsersRes.rows) {
+          mentorGraph.addVertex(u.id, {
+            name: u.name,
+            role: u.role,
+            reputationScore: parseFloat(u.reputation_score) || 5.0,
+          });
+        }
+      }
+
+      // Populate Graph edges from session bookings
+      const bookingsRes = await query(`
+        SELECT mentor_id, learner_id, status FROM session_bookings
+        WHERE mentor_id IS NOT NULL AND learner_id IS NOT NULL
+      `);
+      if (bookingsRes.rows) {
+        for (const b of bookingsRes.rows) {
+          mentorGraph.addEdge(b.learner_id, b.mentor_id, 1, "mentorship", true);
+        }
+      }
+
+      // Populate Graph edge weights from reviews
+      const reviewsRes = await query(`
+        SELECT mentor_id, reviewer_id, rating FROM reviews
+        WHERE mentor_id IS NOT NULL AND reviewer_id IS NOT NULL
+      `);
+      if (reviewsRes.rows) {
+        for (const r of reviewsRes.rows) {
+          mentorGraph.updateEdgeWeight(r.reviewer_id, r.mentor_id, r.rating, true);
+        }
+      }
 
       if (result.rows && result.rows.length > 0) {
         for (const row of result.rows) {
@@ -506,6 +583,7 @@ async function initializeDatabaseAndDsa() {
           skillHashTable.insert(row.skill_name, mentorRecord);
         }
         console.log(`[DSA Engine] Primed Hash Table with ${result.rows.length} skill entries directly from PostgreSQL!`);
+        console.log(`[DSA Engine] Primed Graph with ${mentorGraph.getStats().vertexCount} vertices and ${mentorGraph.getStats().edgeCount} edges!`);
         return true;
       }
     } else {
@@ -669,6 +747,9 @@ application.post("/api/sessions/book", async (request, response) => {
 
     // Step 3: Enqueue in FIFO Queue to maintain pipeline processing order (DSA Feature)
     bookingQueue.enqueue(bookingRequest);
+
+    // Step 4: Connect learner and mentor in the Adjacency Graph (DSA Feature)
+    mentorGraph.addEdge(bookingRequest.learnerId, bookingRequest.mentorId, 1, "mentorship", true);
 
     return response.status(201).json({
       message: "Session booking request saved to database and enqueued successfully.",
@@ -937,6 +1018,14 @@ application.put("/api/users/:userId/skills", async (request, response) => {
 
       skillHashTable.insert(skillName, mentorRecord);
     }
+
+    // Step 4: Update Graph vertex metadata with updated skills and reputation (DSA Feature)
+    mentorGraph.addVertex(updatedUser.userId, {
+      name: updatedUser.name,
+      role: updatedUser.role,
+      skills: updatedUser.skills,
+      reputationScore: updatedUser.reputationScore,
+    });
 
     return response.status(200).json({
       message: "Profile skills and details saved successfully in PostgreSQL database!",
@@ -1398,6 +1487,9 @@ application.post("/api/reviews", async (request, response) => {
       [sess.mentor_id]
     );
 
+    // Update relationship edge weight in the Adjacency Graph (DSA Feature)
+    mentorGraph.updateEdgeWeight(sess.learner_id, sess.mentor_id, parseInt(rating, 10), true);
+
     return response.status(201).json({
       message: "Session review recorded successfully in PostgreSQL! Mentor reputation score updated.",
       review: {
@@ -1419,61 +1511,192 @@ application.post("/api/reviews", async (request, response) => {
 /**
  * ENDPOINT 8: GET /api/recommendations/:userId
  *
- * Returns personalized mentor recommendations for the user.
+ * ALGORITHMIC CORE: MAX-HEAP PRIORITY QUEUE + GRAPH BFS PROXIMITY
+ *
+ * HOW IT WORKS (VIVA DEFENSE POINT):
+ * 1. Fetches candidate mentors and learner's desired skills from PostgreSQL (or seed fallback).
+ * 2. Runs Graph BFS (Breadth-First Search) to compute the exact degree of separation (hops)
+ *    between the learner and each candidate mentor in the community network.
+ * 3. Evaluates a multi-factor composite affinity score for each mentor:
+ *      - Skill Overlap & Expertise Level (40%)
+ *      - Community Reputation Score (40%)
+ *      - Graph Network Proximity (20%)
+ * 4. Inserts all candidates into a Max-Heap (Priority Queue).
+ * 5. Extracts the top-k (6) ranked recommendations in O(k log n) time.
  */
 application.get("/api/recommendations/:userId", async (request, response) => {
   try {
     const targetUserId = request.params.userId;
     const conn = await checkConnection();
 
-    let mentors = [];
+    let candidateMentors = [];
+    let learnerDesiredSkills = [];
 
     if (conn.reachable) {
-      const dbResult = await query(`
-        SELECT u.id, u.name, u.role, u.bio, u.reputation_score,
-               COALESCE(array_agg(s.skill_name) FILTER (WHERE s.type = 'teach' AND s.skill_name IS NOT NULL), '{}') as skills
-        FROM users u
-        LEFT JOIN skills s ON u.id = s.user_id
-        WHERE u.id <> $1
-        GROUP BY u.id, u.name, u.role, u.bio, u.reputation_score
-        ORDER BY u.reputation_score DESC
-        LIMIT 6;
-      `, [targetUserId]);
+      // 1. Fetch learner's desired skills (type = 'learn')
+      const learnerSkillsRes = await query(
+        `SELECT skill_name, level FROM skills WHERE user_id = $1 AND type = 'learn'`,
+        [targetUserId]
+      );
+      learnerDesiredSkills = learnerSkillsRes.rows || [];
 
-      mentors = dbResult.rows || [];
+      // 2. Fetch candidate mentors excluding the requesting learner
+      const dbResult = await query(
+        `SELECT u.id, u.name, u.role, u.bio, u.reputation_score,
+                COALESCE(array_agg(s.skill_name) FILTER (WHERE s.type = 'teach' AND s.skill_name IS NOT NULL), '{}') as skills,
+                COALESCE(
+                  json_agg(json_build_object('skill_name', s.skill_name, 'level', s.level, 'type', s.type))
+                  FILTER (WHERE s.type = 'teach' AND s.skill_name IS NOT NULL), '[]'
+                ) as skill_entries
+         FROM users u
+         LEFT JOIN skills s ON u.id = s.user_id
+         WHERE u.id <> $1
+         GROUP BY u.id, u.name, u.role, u.bio, u.reputation_score
+         ORDER BY u.reputation_score DESC`,
+        [targetUserId]
+      );
+
+      candidateMentors = dbResult.rows || [];
     }
 
-    if (mentors.length === 0) {
-      mentors = seedUsers.filter((u) => u.userId !== targetUserId).slice(0, 6);
+    // Complement candidates with seed catalog mentors if database has few candidates or is offline
+    if (candidateMentors.length < 6) {
+      const existingIds = new Set(candidateMentors.map((m) => m.id || m.userId));
+      existingIds.add(targetUserId);
+      for (const su of seedUsers) {
+        if (!existingIds.has(su.userId)) {
+          candidateMentors.push(su);
+          existingIds.add(su.userId);
+        }
+      }
     }
 
-    const recommendations = mentors.map((m, index) => {
-      const skillsList = Array.isArray(m.skills) ? m.skills : (m.skills ? [m.skills] : []);
-      const score = Math.round((parseFloat(m.reputation_score || m.reputationScore) || 4.5) * 20) - index * 2;
-      return {
-        mentor: {
-          id: m.id || m.userId,
-          userId: m.id || m.userId,
-          name: m.name,
-          role: m.role,
-          bio: m.bio,
-          skills: skillsList,
-          reputationScore: parseFloat(m.reputation_score || m.reputationScore) || 5.0,
+    // Initialize the Max-Heap priority queue
+    const recommendationHeap = new MaxHeap();
+
+    // Score and insert each candidate into the Max-Heap
+    for (const mentor of candidateMentors) {
+      const mentorId = mentor.id || mentor.userId;
+      const skillsList = Array.isArray(mentor.skills) ? mentor.skills : (mentor.skills ? [mentor.skills] : []);
+
+      // Calculate graph network distance (hops) using BFS
+      const networkDistance = mentorGraph.getDegreesOfSeparation(targetUserId, mentorId);
+
+      // Compute composite recommendation score
+      const scoreResult = MaxHeap.computeRecommendationScore(
+        {
+          id: mentorId,
+          name: mentor.name,
+          skills: mentor.skill_entries && Array.isArray(mentor.skill_entries) && mentor.skill_entries.length > 0
+            ? mentor.skill_entries
+            : skillsList,
+          reputation_score: mentor.reputation_score || mentor.reputationScore,
         },
-        score: Math.min(score, 99),
-        rank: index + 1,
-        reason: `High community rating (${m.reputation_score || m.reputationScore}★) and active teaching in ${skillsList.slice(0, 2).join(", ")}.`,
+        learnerDesiredSkills,
+        networkDistance
+      );
+
+      const candidateRecord = {
+        mentor: {
+          id: mentorId,
+          userId: mentorId,
+          name: mentor.name,
+          role: mentor.role,
+          bio: mentor.bio,
+          skills: skillsList,
+          reputationScore: parseFloat(mentor.reputation_score || mentor.reputationScore) || 5.0,
+        },
+        score: scoreResult.score,
+        reason: scoreResult.reason,
+        networkProximity: networkDistance === Infinity ? "community" : `${networkDistance}-hop`,
+        breakdown: scoreResult.breakdown,
       };
-    });
+
+      recommendationHeap.insert(candidateRecord);
+    }
+
+    // Extract top-6 ranked recommendations from Max-Heap in O(k log n) time
+    const topMentors = recommendationHeap.extractTopK(6);
+
+    const rankedRecommendations = topMentors.map((item, index) => ({
+      mentor: item.mentor,
+      score: item.score,
+      rank: index + 1,
+      reason: item.reason,
+      networkProximity: item.networkProximity,
+      breakdown: item.breakdown,
+    }));
 
     return response.status(200).json({
-      recommendations,
+      recommendations: rankedRecommendations,
+      totalCandidatesEvaluated: candidateMentors.length,
+      algorithm: "Max-Heap Priority Queue with Graph BFS Proximity",
     });
   } catch (error) {
     console.error("Error generating recommendations:", error);
     return response.status(500).json({
       error: "An internal server error occurred while generating recommendations.",
+      details: error.message,
     });
+  }
+});
+
+/**
+ * ENDPOINT: GET /api/network/proximity/:userId
+ *
+ * Uses Graph BFS to calculate degrees of separation and shortest path
+ * between the requested user and another user.
+ */
+application.get("/api/network/proximity/:userId", async (request, response) => {
+  try {
+    const sourceUserId = request.params.userId;
+    const targetUserId = request.query.targetId;
+
+    if (!targetUserId) {
+      return response.status(400).json({
+        error: "Missing required query parameter: targetId. Example: /api/network/proximity/user_1?targetId=user_3",
+      });
+    }
+
+    const degrees = mentorGraph.getDegreesOfSeparation(sourceUserId, targetUserId);
+    const { shortestPath } = mentorGraph.bfs(sourceUserId, targetUserId);
+    const mutualConnections = mentorGraph.findMutualConnections(sourceUserId, targetUserId);
+
+    return response.status(200).json({
+      sourceUserId,
+      targetUserId,
+      degreesOfSeparation: degrees === Infinity ? null : degrees,
+      isDirectConnection: degrees === 1,
+      shortestPath,
+      mutualConnections,
+      hopLabel: degrees === 1 ? "1st degree" : degrees === 2 ? "2nd degree (mutual peer)" : degrees === Infinity ? "disconnected" : `${degrees} hops`,
+    });
+  } catch (error) {
+    return response.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * ENDPOINT: GET /api/network/stats
+ *
+ * Returns live Graph network metrics (vertex count, edge count, density, connected components).
+ */
+application.get("/api/network/stats", async (request, response) => {
+  try {
+    const stats = mentorGraph.getStats();
+    const components = mentorGraph.findConnectedComponents();
+
+    return response.status(200).json({
+      ...stats,
+      connectedCommunitiesCount: components.length,
+      communities: components.map((comp, idx) => ({
+        communityId: idx + 1,
+        size: comp.length,
+        members: comp.slice(0, 10),
+      })),
+    });
+  } catch (error) {
+    return response.status(500).json({ error: error.message });
   }
 });
 
@@ -2341,6 +2564,9 @@ module.exports = {
   seedUsers,
   skillHashTable,
   bookingQueue,
+  mentorGraph,
+  MaxHeap,
+  Graph,
   seedDatabase,
   sortMentorsByLevel,
   initializeDatabaseAndDsa,
