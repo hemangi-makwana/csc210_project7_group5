@@ -26,6 +26,7 @@ import { SessionBooking } from './pages/SessionBooking.jsx';
 import { LearningHistory } from './pages/LearningHistory.jsx';
 import { SkillProfile } from './pages/SkillProfile.jsx';
 import { Login } from './pages/Login.jsx';
+import { Register } from './pages/Register.jsx';
 
 export function App() {
   return (
@@ -43,6 +44,7 @@ export function App() {
           <Route path="/history" element={<LearningHistory />} />
           <Route path="/profile" element={<SkillProfile />} />
           <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
           {/* Fallback route for unknown URLs */}
           <Route path="*" element={<Home />} />
         </Routes>

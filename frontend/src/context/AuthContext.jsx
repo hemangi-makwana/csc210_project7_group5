@@ -15,7 +15,7 @@
  */
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { loginUser } from '../api/auth.js';
+import { loginUser, registerUser } from '../api/auth.js';
 
 // Create the Context object
 const AuthContext = createContext(null);
@@ -88,6 +88,25 @@ export function AuthProvider({ children }) {
   }
 
   /**
+   * Registers a user and starts their authenticated session.
+   */
+  async function register(name, email, password, role) {
+    setIsLoading(true);
+    try {
+      const response = await registerUser({ name, email, password, role });
+      if (response && response.token && response.user) {
+        localStorage.setItem('token', response.token);
+        localStorage.setItem('user_data', JSON.stringify(response.user));
+        setUser(response.user);
+        return response.user;
+      }
+      throw new Error('Invalid response from server during registration');
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  /**
    * Logs out the current user.
    * Clears localStorage credentials and resets user state to null.
    */
@@ -101,6 +120,7 @@ export function AuthProvider({ children }) {
   const contextValue = {
     user: user,
     login: login,
+    register: register,
     logout: logout,
     isLoading: isLoading,
     isAuthenticated: !!user,

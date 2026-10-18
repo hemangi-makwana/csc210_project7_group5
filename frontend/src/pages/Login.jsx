@@ -45,15 +45,6 @@ export function Login() {
     }
   }
 
-  /**
-   * Helper function to pre-fill credentials for quick live demonstration during viva.
-   */
-  function handleQuickFill(fillEmail, fillPassword) {
-    setEmail(fillEmail);
-    setPassword(fillPassword);
-    setErrorMessage(null);
-  }
-
   return (
     <div className="page" style={{ maxWidth: '480px', marginTop: '1rem' }}>
       <div className="page-header" style={{ textAlign: 'center' }}>
@@ -108,40 +99,19 @@ export function Login() {
           </button>
         </form>
 
-        {/* Quick Access Account Helpers */}
+        {/* Register link */}
         <div style={{
-          marginTop: '1.75rem',
+          marginTop: '1.5rem',
           paddingTop: '1.25rem',
           borderTop: '1px dashed var(--color-border)',
           textAlign: 'center'
         }}>
-          <p style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', marginBottom: '0.75rem', fontWeight: '600', textTransform: 'uppercase' }}>
-            Quick access:
+          <p style={{ fontSize: '0.875rem', color: 'var(--color-text-muted)' }}>
+            Don&apos;t have an account?{' '}
+            <Link to="/register" style={{ color: 'var(--color-primary)', fontWeight: '600' }}>
+              Create one here
+            </Link>
           </p>
-
-          <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'center', flexWrap: 'wrap' }}>
-            <button
-              type="button"
-              onClick={() => handleQuickFill('sarah.lin@example.com', 'password123')}
-              className="btn btn-sm btn-outline"
-            >
-              👩‍🏫 Professional
-            </button>
-            <button
-              type="button"
-              onClick={() => handleQuickFill('alex.rivera@example.com', 'password123')}
-              className="btn btn-sm btn-outline"
-            >
-              🎓 Student
-            </button>
-            <button
-              type="button"
-              onClick={() => handleQuickFill('maya.chen@example.com', 'password123')}
-              className="btn btn-sm btn-outline"
-            >
-              🤝 Volunteer
-            </button>
-          </div>
         </div>
       </div>
     </div>

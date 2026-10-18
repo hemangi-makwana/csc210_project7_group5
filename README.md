@@ -142,7 +142,35 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#6-rest-api-contract) for full re
 
 ## Getting Started
 
-*(Installation, local development setup instructions, and prerequisites will be documented here as development progresses.)*
+### Prerequisites
+- **Node.js**: v18.0.0 or higher
+- **PostgreSQL**: Standard local PostgreSQL server (v14+) running on `localhost:5432`
+
+### 1. Database Setup (Local PostgreSQL)
+1. Start your local PostgreSQL service.
+2. Create the development database:
+   ```sql
+   CREATE DATABASE skill_exchange;
+   ```
+3. Configure environment credentials in `backend/.env` (see `backend/.env.example`).
+4. Initialize the tables and seed data:
+   ```bash
+   cd backend
+   npm run db:setup
+   npm run db:seed
+   ```
+
+### 2. Starting the Application
+- **Backend Service**:
+  ```bash
+  cd backend
+  npm start
+  ```
+- **Frontend SPA**:
+  ```bash
+  cd frontend
+  npm run dev
+  ```
 
 ---
 

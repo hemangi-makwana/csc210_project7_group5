@@ -101,35 +101,9 @@ function handleMockFallback(endpoint, options = {}) {
   const method = (options.method || 'GET').toUpperCase();
   const path = endpoint.split('?')[0];
 
-  // 1. Auth login simulation
-  if (path === '/auth/login' && method === 'POST') {
-    const payload = options.body ? JSON.parse(options.body) : {};
-    const foundUser = MOCK_DATA.users.find(u => u.email === payload.email) || MOCK_DATA.users[0];
-    return {
-      token: 'mock-jwt-token-for-' + foundUser.id,
-      user: foundUser,
-      isMock: true,
-    };
-  }
-
-  // 2. Auth register simulation
-  if (path === '/auth/register' && method === 'POST') {
-    const payload = options.body ? JSON.parse(options.body) : {};
-    const newUser = {
-      id: 'usr_' + Date.now(),
-      name: payload.name || 'New Learner',
-      email: payload.email || 'user@example.com',
-      role: payload.role || 'student',
-      bio: 'New community learner',
-      reputation_score: 5.0,
-      skills: [],
-    };
-    return {
-      token: 'mock-jwt-token-for-' + newUser.id,
-      user: newUser,
-      isMock: true,
-    };
-  }
+  // NOTE: /auth/login and /auth/register are intentionally NOT handled here.
+  // Authentication always requires a live PostgreSQL connection — there is no
+  // safe mock fallback for verifying passwords or creating real user accounts.
 
   // 3. Skill Search: /skills/search?query=...
   if (path === '/skills/search' && method === 'GET') {
@@ -279,13 +253,18 @@ export async function request(endpoint, options = {}) {
     headers: headers,
   };
 
+  // Auth endpoints must never fall back to mock data — they require a live
+  // PostgreSQL connection. If the backend is unreachable, surface the real error.
+  const path = endpoint.split('?')[0];
+  const isAuthEndpoint = path === '/auth/login' || path === '/auth/register';
+
   try {
     const response = await fetch(`${API_BASE_URL}${endpoint}`, config);
 
     // If server responds with HTTP error status (4xx or 5xx)
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      const error = new Error(errorData.message || `API request failed with status ${response.status}`);
+      const error = new Error(errorData.message || errorData.error || `Request failed with status ${response.status}`);
       error.status = response.status;
       error.data = errorData;
       throw error;
@@ -295,13 +274,16 @@ export async function request(endpoint, options = {}) {
     const data = await response.json();
     return data;
   } catch (networkError) {
-    // If backend server is unreachable (connection refused, offline, etc.)
+    // Auth endpoints: always re-throw — no mock fallback allowed
+    if (isAuthEndpoint) {
+      throw networkError;
+    }
+
+    // All other endpoints: fall back to built-in simulation for demo resilience
     console.warn(
-      `[API Client] Backend server unreachable at "${API_BASE_URL}${endpoint}". Falling back to demo mock data.`,
+      `[API Client] Backend unreachable at "${API_BASE_URL}${endpoint}". Falling back to demo mock data.`,
       networkError.message
     );
-
-    // Fall back to built-in simulation and flag with isMock: true
     return handleMockFallback(endpoint, options);
   }
 }

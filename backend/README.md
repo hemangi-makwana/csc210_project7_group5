@@ -53,6 +53,34 @@ backend/
 └── README.md          # Module overview
 ```
 
+## Local PostgreSQL Database Setup
+
+The backend connects directly to a standard local PostgreSQL database instance for development:
+
+1. **Install & Start PostgreSQL Locally**:
+   - Ensure PostgreSQL is running locally on port `5432`.
+   - Create a local database named `skill_exchange`:
+     ```sql
+     CREATE DATABASE skill_exchange;
+     ```
+2. **Environment Configuration**:
+   - Copy `.env.example` to `.env` in the `backend/` directory:
+     ```bash
+     cp .env.example .env
+     ```
+   - Update `PGUSER`, `PGPASSWORD`, and `PGDATABASE` with your local PostgreSQL credentials. (Note: `.env` is ignored by git and never committed).
+3. **Initialize Schema & Seed Data**:
+   - Apply the database schema:
+     ```bash
+     npm run db:setup
+     ```
+   - Seed the 20 initial mentors and skills:
+     ```bash
+     npm run db:seed
+     ```
+4. **Health Check Endpoint**:
+   - Verify connection status at `GET /api/health/db`.
+
 ## System Architecture Reference
 
 For detailed sequence diagrams, database entity relationships, and the complete REST API specification, see [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md).
