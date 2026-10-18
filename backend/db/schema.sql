@@ -129,4 +129,7 @@ CREATE INDEX IF NOT EXISTS idx_session_bookings_status ON session_bookings (stat
 CREATE INDEX IF NOT EXISTS idx_reviews_mentor ON reviews (mentor_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON notifications (user_id, is_read);
 CREATE INDEX IF NOT EXISTS idx_course_requests_status ON course_requests (status);
+CREATE INDEX IF NOT EXISTS idx_course_requests_title ON course_requests (LOWER(title), status);
+CREATE INDEX IF NOT EXISTS idx_course_requests_requester ON course_requests (requester_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications (user_id);
 CREATE INDEX IF NOT EXISTS idx_users_username ON users (LOWER(username));

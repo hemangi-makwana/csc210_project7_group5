@@ -89,6 +89,79 @@ function authenticateToken(request, response, next) {
   }
 }
 
+/**
+ * Helper: matchSkillsAndNotifyLearners
+ * Scans open course requests matching the provided teachable skill names (case-insensitively).
+ * Creates notifications for requesting learners and marks requests as fulfilled.
+ * Prevents duplicate notifications and ignores self-matches.
+ *
+ * @param {object} dbClient - Dedicated PostgreSQL client (inside an active transaction) or query runner
+ * @param {string} teacherId - ID of the mentor/teacher
+ * @param {string} teacherName - Display name of the mentor/teacher
+ * @param {Array<string>} teachSkillNames - Array of skill names taught
+ * @returns {Promise<Array>} List of notifications created
+ */
+async function matchSkillsAndNotifyLearners(dbClient, teacherId, teacherName, teachSkillNames) {
+  const notificationsCreated = [];
+  if (!teachSkillNames || !Array.isArray(teachSkillNames) || teachSkillNames.length === 0) {
+    return notificationsCreated;
+  }
+
+  for (const rawSkillName of teachSkillNames) {
+    if (!rawSkillName || typeof rawSkillName !== "string") continue;
+    const cleanSkill = rawSkillName.trim();
+    if (!cleanSkill) continue;
+
+    // Find open course requests matching this skill (case-insensitive), excluding teacher's own requests
+    const matchesRes = await dbClient.query(
+      `SELECT id, requester_id, title
+       FROM course_requests
+       WHERE status = 'open'
+         AND LOWER(title) = LOWER($1)
+         AND requester_id != $2`,
+      [cleanSkill, teacherId]
+    );
+
+    for (const match of matchesRes.rows) {
+      const learnerId = match.requester_id;
+      const targetLink = `/skills/search?query=${encodeURIComponent(cleanSkill)}`;
+
+      // Check if notification already exists to avoid duplicate notifications
+      const existingNotif = await dbClient.query(
+        `SELECT id FROM notifications
+         WHERE user_id = $1
+           AND type = 'course_match'
+           AND (link = $2 OR message LIKE $3)`,
+        [learnerId, targetLink, `%${cleanSkill}%`]
+      );
+
+      if (existingNotif.rows.length === 0) {
+        const notifTitle = `Skill Now Available: ${cleanSkill}`;
+        const notifMsg = `Great news! ${teacherName || "A mentor"} is now offering to teach "${cleanSkill}", matching your course request "${match.title}".`;
+
+        const insertNotif = await dbClient.query(
+          `INSERT INTO notifications (user_id, type, title, message, link, is_read, created_at)
+           VALUES ($1, 'course_match', $2, $3, $4, FALSE, CURRENT_TIMESTAMP)
+           RETURNING id, user_id, type, title, message, link, is_read, created_at`,
+          [learnerId, notifTitle, notifMsg, targetLink]
+        );
+
+        // Mark course request as fulfilled
+        await dbClient.query(
+          `UPDATE course_requests
+           SET status = 'fulfilled', updated_at = CURRENT_TIMESTAMP
+           WHERE id = $1`,
+          [match.id]
+        );
+
+        notificationsCreated.push(insertNotif.rows[0]);
+      }
+    }
+  }
+
+  return notificationsCreated;
+}
+
 // ----------------------------------------------------------------------------
 // DATA STRUCTURE INSTANCES (ALGORITHMIC CORE ENGINE)
 // ----------------------------------------------------------------------------
@@ -728,87 +801,123 @@ application.put("/api/users/:userId/skills", async (request, response) => {
       });
     }
 
-    // Step 2: Persist directly into PostgreSQL with parameterized queries
-    const updateClauses = ["bio = $1", "profile_summary = $2", "updated_at = CURRENT_TIMESTAMP"];
-    const updateVals = [incomingBio, incomingSummary];
-    let pIdx = 3;
+    // Step 2: Persist directly into PostgreSQL inside an atomic transaction
+    const client = await pool.connect();
+    let updatedUser;
+    let notificationsSent = [];
 
-    if (request.body.specialization_domain !== undefined) {
-      updateClauses.push(`specialization_domain = $${pIdx++}`);
-      updateVals.push(request.body.specialization_domain ? request.body.specialization_domain.trim() : null);
-    }
-    if (request.body.work_experience !== undefined) {
-      updateClauses.push(`work_experience = $${pIdx++}::jsonb`);
-      updateVals.push(JSON.stringify(request.body.work_experience));
-    }
-    if (request.body.social_profiles !== undefined) {
-      updateClauses.push(`social_profiles = $${pIdx++}::jsonb`);
-      updateVals.push(JSON.stringify(request.body.social_profiles));
-    }
-    if (request.body.username !== undefined && request.body.username) {
-      const cleanUser = request.body.username.trim().toLowerCase();
-      const dup = await query("SELECT id FROM users WHERE LOWER(username) = $1 AND id != $2", [cleanUser, targetUserId]);
-      if (dup.rows.length > 0) {
-        return response.status(409).json({ error: `Username "${request.body.username}" is already taken.` });
-      }
-      updateClauses.push(`username = $${pIdx++}`);
-      updateVals.push(cleanUser);
-    }
-    updateVals.push(targetUserId);
+    try {
+      await client.query("BEGIN");
 
-    await query(
-      `UPDATE users SET ${updateClauses.join(", ")} WHERE id = $${pIdx}`,
-      updateVals
-    );
-
-    // Delete existing skills for this user and insert updated list
-    await query(`DELETE FROM skills WHERE user_id = $1`, [targetUserId]);
-
-    for (const skill of incomingSkills) {
-      const skillName = skill.skill_name || skill.skillName;
-      const level = skill.level || "beginner";
-      const type = skill.type || "teach";
-
-      if (skillName) {
-        await query(
-          `INSERT INTO skills (user_id, skill_name, level, type)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT ON CONSTRAINT uq_user_skill_type DO NOTHING`,
-          [targetUserId, skillName, level, type]
+      // Check username duplicate if changing username
+      if (request.body.username !== undefined && request.body.username) {
+        const cleanUser = request.body.username.trim().toLowerCase();
+        const dup = await client.query(
+          "SELECT id FROM users WHERE LOWER(username) = $1 AND id != $2",
+          [cleanUser, targetUserId]
         );
+        if (dup.rows.length > 0) {
+          await client.query("ROLLBACK");
+          return response.status(409).json({ error: `Username "${request.body.username}" is already taken.` });
+        }
       }
+
+      const updateClauses = ["bio = $1", "profile_summary = $2", "updated_at = CURRENT_TIMESTAMP"];
+      const updateVals = [incomingBio, incomingSummary];
+      let pIdx = 3;
+
+      if (request.body.specialization_domain !== undefined) {
+        updateClauses.push(`specialization_domain = $${pIdx++}`);
+        updateVals.push(request.body.specialization_domain ? request.body.specialization_domain.trim() : null);
+      }
+      if (request.body.work_experience !== undefined) {
+        updateClauses.push(`work_experience = $${pIdx++}::jsonb`);
+        updateVals.push(JSON.stringify(request.body.work_experience));
+      }
+      if (request.body.social_profiles !== undefined) {
+        updateClauses.push(`social_profiles = $${pIdx++}::jsonb`);
+        updateVals.push(JSON.stringify(request.body.social_profiles));
+      }
+      if (request.body.username !== undefined && request.body.username) {
+        updateClauses.push(`username = $${pIdx++}`);
+        updateVals.push(request.body.username.trim().toLowerCase());
+      }
+      updateVals.push(targetUserId);
+
+      await client.query(
+        `UPDATE users SET ${updateClauses.join(", ")} WHERE id = $${pIdx}`,
+        updateVals
+      );
+
+      // Delete existing skills for this user and insert updated list
+      await client.query(`DELETE FROM skills WHERE user_id = $1`, [targetUserId]);
+
+      const teachSkillNames = [];
+      for (const skill of incomingSkills) {
+        const skillName = skill.skill_name || skill.skillName;
+        const level = skill.level || "beginner";
+        const type = skill.type || "teach";
+
+        if (skillName) {
+          await client.query(
+            `INSERT INTO skills (user_id, skill_name, level, type)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT ON CONSTRAINT uq_user_skill_type DO NOTHING`,
+            [targetUserId, skillName, level, type]
+          );
+
+          if (type === "teach") {
+            teachSkillNames.push(skillName);
+          }
+        }
+      }
+
+      // Fetch refreshed user record directly from database
+      const userRes = await client.query(
+        `SELECT id, name, email, username, role, bio, profile_summary, specialization_domain,
+                work_experience, social_profiles, avatar_url, reputation_score
+         FROM users WHERE id = $1`,
+        [targetUserId]
+      );
+      const row = userRes.rows[0] || {
+        id: targetUserId,
+        name: "User " + targetUserId,
+        bio: incomingBio,
+        profile_summary: incomingSummary,
+        reputation_score: 5.0,
+      };
+
+      updatedUser = {
+        userId: row.id,
+        id: row.id,
+        name: row.name,
+        username: row.username || null,
+        bio: row.bio || incomingBio,
+        profile_summary: row.profile_summary || row.bio || incomingBio,
+        specialization_domain: row.specialization_domain || "",
+        work_experience: row.work_experience || [],
+        social_profiles: row.social_profiles || {},
+        avatar_url: row.avatar_url || null,
+        reputationScore: parseFloat(row.reputation_score) || 5.0,
+        skills: incomingSkills.filter((s) => s.type === "teach").map((s) => s.skill_name || s.skillName),
+        skillEntries: incomingSkills,
+      };
+
+      // When teachable skills are added, match open course requests and notify requesting learners
+      notificationsSent = await matchSkillsAndNotifyLearners(
+        client,
+        targetUserId,
+        updatedUser.name,
+        teachSkillNames
+      );
+
+      await client.query("COMMIT");
+    } catch (txErr) {
+      await client.query("ROLLBACK");
+      throw txErr;
+    } finally {
+      client.release();
     }
-
-    // Fetch refreshed user record directly from database
-    const userRes = await query(
-      `SELECT id, name, email, username, role, bio, profile_summary, specialization_domain,
-              work_experience, social_profiles, avatar_url, reputation_score
-       FROM users WHERE id = $1`,
-      [targetUserId]
-    );
-    const row = userRes.rows[0] || {
-      id: targetUserId,
-      name: "User " + targetUserId,
-      bio: incomingBio,
-      profile_summary: incomingSummary,
-      reputation_score: 5.0,
-    };
-
-    const updatedUser = {
-      userId: row.id,
-      id: row.id,
-      name: row.name,
-      username: row.username || null,
-      bio: row.bio || incomingBio,
-      profile_summary: row.profile_summary || row.bio || incomingBio,
-      specialization_domain: row.specialization_domain || "",
-      work_experience: row.work_experience || [],
-      social_profiles: row.social_profiles || {},
-      avatar_url: row.avatar_url || null,
-      reputationScore: parseFloat(row.reputation_score) || 5.0,
-      skills: incomingSkills.filter((s) => s.type === "teach").map((s) => s.skill_name || s.skillName),
-      skillEntries: incomingSkills,
-    };
 
     // Step 3: Dynamically re-index newly saved teachable skills into the Hash Table for instant O(1) search
     for (const skill of incomingSkills) {
@@ -831,6 +940,7 @@ application.put("/api/users/:userId/skills", async (request, response) => {
 
     return response.status(200).json({
       message: "Profile skills and details saved successfully in PostgreSQL database!",
+      notificationsSentCount: notificationsSent.length,
       user: {
         userId: updatedUser.userId,
         id: updatedUser.userId,
@@ -1364,6 +1474,571 @@ application.get("/api/recommendations/:userId", async (request, response) => {
     return response.status(500).json({
       error: "An internal server error occurred while generating recommendations.",
     });
+  }
+});
+
+// ----------------------------------------------------------------------------
+// COURSE & WORKSHOP REQUESTS ENDPOINTS (PostgreSQL-backed)
+// ----------------------------------------------------------------------------
+
+/**
+ * ENDPOINT: POST /api/course-requests
+ *
+ * Allows an authenticated learner to request a skill or course that is NOT currently available.
+ * Validates:
+ * 1. Title is required (at least 2 characters, max 255).
+ * 2. Category is required (defaults to "General", max 100).
+ * 3. Skill must NOT already be actively taught on SkillSwap.
+ * 4. Learner cannot have duplicate active open requests for the same skill.
+ */
+application.post("/api/course-requests", authenticateToken, async (request, response) => {
+  try {
+    const requesterId = request.user.userId;
+    const { title, description, category } = request.body;
+
+    if (!title || typeof title !== "string" || title.trim().length < 2) {
+      return response.status(400).json({
+        error: "Course/skill title is required (at least 2 characters).",
+      });
+    }
+
+    const cleanTitle = title.trim();
+    const cleanCategory = category && typeof category === "string" ? category.trim() : "General";
+    const cleanDesc = description && typeof description === "string" ? description.trim() : "";
+
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({
+        error: "Database unavailable. Course request could not be saved.",
+      });
+    }
+
+    // Check if an existing mentor already teaches this skill in PostgreSQL or active catalog
+    const existingSkillDb = await query(
+      `SELECT s.skill_name, u.name as mentor_name
+       FROM skills s
+       JOIN users u ON s.user_id = u.id
+       WHERE s.type = 'teach' AND LOWER(s.skill_name) = LOWER($1)
+       LIMIT 1`,
+      [cleanTitle]
+    );
+
+    const catalogMentors =
+      typeof skillHashTable !== "undefined" && typeof skillHashTable.lookup === "function"
+        ? skillHashTable.lookup(cleanTitle)
+        : [];
+
+    if (existingSkillDb.rows.length > 0 || (catalogMentors && catalogMentors.length > 0)) {
+      const activeMentorName =
+        existingSkillDb.rows.length > 0
+          ? existingSkillDb.rows[0].mentor_name
+          : catalogMentors[0].name;
+
+      return response.status(400).json({
+        error: `The skill "${cleanTitle}" is already available on SkillSwap! Mentor ${activeMentorName} is currently teaching it. You can search mentors and book a session directly.`,
+        alreadyAvailable: true,
+        skillName: cleanTitle,
+        mentorName: activeMentorName,
+      });
+    }
+
+    // Check if the learner already has an active open request for this skill
+    const duplicateRequest = await query(
+      `SELECT id FROM course_requests
+       WHERE requester_id = $1 AND LOWER(title) = LOWER($2) AND status = 'open'`,
+      [requesterId, cleanTitle]
+    );
+
+    if (duplicateRequest.rows.length > 0) {
+      return response.status(409).json({
+        error: `You already have an open course request for "${cleanTitle}".`,
+      });
+    }
+
+    // Insert new course request
+    const insertRes = await query(
+      `INSERT INTO course_requests (requester_id, title, description, category, status, votes_count)
+       VALUES ($1, $2, $3, $4, 'open', 1)
+       RETURNING id, requester_id, title, description, category, status, votes_count, created_at, updated_at`,
+      [requesterId, cleanTitle, cleanDesc, cleanCategory]
+    );
+
+    return response.status(201).json({
+      message: `Course request for "${cleanTitle}" created successfully. You will be notified as soon as a mentor offers to teach it.`,
+      courseRequest: insertRes.rows[0],
+    });
+  } catch (error) {
+    console.error("Error creating course request:", error);
+    return response.status(500).json({
+      error: "An internal server error occurred while creating course request.",
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * ENDPOINT: GET /api/course-requests/my
+ * Returns all course requests submitted by the authenticated user.
+ */
+application.get("/api/course-requests/my", authenticateToken, async (request, response) => {
+  try {
+    const requesterId = request.user.userId;
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable." });
+    }
+
+    const res = await query(
+      `SELECT id, requester_id, title, description, category, status, votes_count, created_at, updated_at
+       FROM course_requests
+       WHERE requester_id = $1
+       ORDER BY created_at DESC`,
+      [requesterId]
+    );
+
+    return response.status(200).json({
+      courseRequests: res.rows || [],
+    });
+  } catch (error) {
+    console.error("Error fetching user's course requests:", error);
+    return response.status(500).json({
+      error: "An internal server error occurred while retrieving course requests.",
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * ENDPOINT: GET /api/users/:userId/course-requests
+ * Returns all course requests for a specific user ID (ownership strictly enforced).
+ */
+application.get("/api/users/:userId/course-requests", authenticateToken, async (request, response) => {
+  try {
+    const targetUserId = request.params.userId;
+    if (request.user.userId !== targetUserId) {
+      return response.status(403).json({
+        error: "Forbidden: You are not authorized to view another user's course requests.",
+      });
+    }
+
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable." });
+    }
+
+    const res = await query(
+      `SELECT id, requester_id, title, description, category, status, votes_count, created_at, updated_at
+       FROM course_requests
+       WHERE requester_id = $1
+       ORDER BY created_at DESC`,
+      [targetUserId]
+    );
+
+    return response.status(200).json({
+      courseRequests: res.rows || [],
+    });
+  } catch (error) {
+    console.error("Error fetching user course requests:", error);
+    return response.status(500).json({
+      error: "An internal server error occurred while retrieving course requests.",
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * ENDPOINT: GET /api/course-requests
+ * Returns community course requests (filterable by status: ?status=open/fulfilled/all).
+ */
+application.get("/api/course-requests", async (request, response) => {
+  try {
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable." });
+    }
+
+    const statusFilter = request.query.status || "open";
+    const res = await query(
+      `SELECT cr.id, cr.requester_id, cr.title, cr.description, cr.category, cr.status, cr.votes_count, cr.created_at,
+              u.name as requester_name
+       FROM course_requests cr
+       JOIN users u ON cr.requester_id = u.id
+       WHERE ($1 = 'all' OR cr.status = $1)
+       ORDER BY cr.created_at DESC`,
+      [statusFilter]
+    );
+
+    return response.status(200).json({
+      courseRequests: res.rows || [],
+    });
+  } catch (error) {
+    console.error("Error fetching course requests:", error);
+    return response.status(500).json({
+      error: "An internal server error occurred while retrieving course requests.",
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * ENDPOINT: GET /api/course-requests/:id
+ * Retrieves a single course request by ID.
+ */
+application.get("/api/course-requests/:id", async (request, response) => {
+  try {
+    const requestId = parseInt(request.params.id, 10);
+    if (isNaN(requestId)) {
+      return response.status(400).json({ error: "Invalid course request ID." });
+    }
+
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable." });
+    }
+
+    const res = await query(
+      `SELECT cr.id, cr.requester_id, cr.title, cr.description, cr.category, cr.status, cr.votes_count, cr.created_at, cr.updated_at,
+              u.name as requester_name, u.email as requester_email
+       FROM course_requests cr
+       JOIN users u ON cr.requester_id = u.id
+       WHERE cr.id = $1`,
+      [requestId]
+    );
+
+    if (res.rows.length === 0) {
+      return response.status(404).json({ error: "Course request not found." });
+    }
+
+    return response.status(200).json({
+      courseRequest: res.rows[0],
+    });
+  } catch (error) {
+    console.error("Error retrieving course request:", error);
+    return response.status(500).json({
+      error: "An internal server error occurred while retrieving course request.",
+      details: error.message,
+    });
+  }
+});
+
+// ----------------------------------------------------------------------------
+// NOTIFICATIONS ENDPOINTS (PostgreSQL-backed)
+// ----------------------------------------------------------------------------
+
+/**
+ * ENDPOINT: GET /api/notifications
+ * Returns all notifications for the authenticated user, ordered newest first.
+ */
+application.get("/api/notifications", authenticateToken, async (request, response) => {
+  try {
+    const userId = request.user.userId;
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable." });
+    }
+
+    const notifRes = await query(
+      `SELECT id, user_id, type, title, message, is_read, link, created_at
+       FROM notifications
+       WHERE user_id = $1
+       ORDER BY created_at DESC`,
+      [userId]
+    );
+
+    const unreadCountRes = await query(
+      `SELECT COUNT(*)::int as unread_count
+       FROM notifications
+       WHERE user_id = $1 AND is_read = FALSE`,
+      [userId]
+    );
+
+    return response.status(200).json({
+      notifications: notifRes.rows || [],
+      unreadCount: unreadCountRes.rows[0]?.unread_count || 0,
+    });
+  } catch (error) {
+    console.error("Error retrieving notifications:", error);
+    return response.status(500).json({
+      error: "An internal server error occurred while retrieving notifications.",
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * ENDPOINT: GET /api/users/:userId/notifications
+ * Returns all notifications for a specific user ID (ownership strictly enforced).
+ */
+application.get("/api/users/:userId/notifications", authenticateToken, async (request, response) => {
+  try {
+    const targetUserId = request.params.userId;
+    if (request.user.userId !== targetUserId) {
+      return response.status(403).json({
+        error: "Forbidden: You are not authorized to view another user's notifications.",
+      });
+    }
+
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable." });
+    }
+
+    const notifRes = await query(
+      `SELECT id, user_id, type, title, message, is_read, link, created_at
+       FROM notifications
+       WHERE user_id = $1
+       ORDER BY created_at DESC`,
+      [targetUserId]
+    );
+
+    const unreadCountRes = await query(
+      `SELECT COUNT(*)::int as unread_count
+       FROM notifications
+       WHERE user_id = $1 AND is_read = FALSE`,
+      [targetUserId]
+    );
+
+    return response.status(200).json({
+      notifications: notifRes.rows || [],
+      unreadCount: unreadCountRes.rows[0]?.unread_count || 0,
+    });
+  } catch (error) {
+    console.error("Error retrieving user notifications:", error);
+    return response.status(500).json({
+      error: "An internal server error occurred while retrieving notifications.",
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * Handler for marking a single notification as read
+ */
+const markNotificationReadHandler = async (request, response) => {
+  try {
+    const notifId = parseInt(request.params.id, 10);
+    if (isNaN(notifId)) {
+      return response.status(400).json({ error: "Invalid notification ID." });
+    }
+
+    const userId = request.user.userId;
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable." });
+    }
+
+    // Verify notification exists and belongs to this user
+    const checkRes = await query(
+      "SELECT id, user_id FROM notifications WHERE id = $1",
+      [notifId]
+    );
+
+    if (checkRes.rows.length === 0) {
+      return response.status(404).json({ error: "Notification not found." });
+    }
+
+    if (checkRes.rows[0].user_id !== userId) {
+      return response.status(403).json({
+        error: "Forbidden: You are not authorized to modify another user's notification.",
+      });
+    }
+
+    const updateRes = await query(
+      `UPDATE notifications
+       SET is_read = TRUE
+       WHERE id = $1 AND user_id = $2
+       RETURNING id, user_id, type, title, message, is_read, link, created_at`,
+      [notifId, userId]
+    );
+
+    return response.status(200).json({
+      message: "Notification marked as read.",
+      notification: updateRes.rows[0],
+    });
+  } catch (error) {
+    console.error("Error marking notification as read:", error);
+    return response.status(500).json({
+      error: "An internal server error occurred while updating notification.",
+      details: error.message,
+    });
+  }
+};
+
+application.patch("/api/notifications/:id/read", authenticateToken, markNotificationReadHandler);
+application.put("/api/notifications/:id/read", authenticateToken, markNotificationReadHandler);
+
+/**
+ * Handler for marking all user notifications as read
+ */
+const markAllNotificationsReadHandler = async (request, response) => {
+  try {
+    const userId = request.user.userId;
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable." });
+    }
+
+    const updateRes = await query(
+      `UPDATE notifications
+       SET is_read = TRUE
+       WHERE user_id = $1 AND is_read = FALSE
+       RETURNING id`,
+      [userId]
+    );
+
+    return response.status(200).json({
+      message: "All unread notifications marked as read.",
+      markedCount: updateRes.rowCount || 0,
+    });
+  } catch (error) {
+    console.error("Error marking all notifications as read:", error);
+    return response.status(500).json({
+      error: "An internal server error occurred while updating notifications.",
+      details: error.message,
+    });
+  }
+};
+
+application.patch("/api/notifications/read-all", authenticateToken, markAllNotificationsReadHandler);
+application.put("/api/notifications/read-all", authenticateToken, markAllNotificationsReadHandler);
+
+// ----------------------------------------------------------------------------
+// MENTOR LISTINGS ENDPOINTS (PostgreSQL-backed)
+// ----------------------------------------------------------------------------
+
+/**
+ * Handler for creating or updating a mentor listing
+ */
+const upsertMentorListingHandler = async (request, response) => {
+  try {
+    const targetUserId = request.params.userId || request.user.userId;
+
+    // Strict ownership verification
+    if (request.user.userId !== targetUserId) {
+      return response.status(403).json({
+        error: "Forbidden: You are not authorized to update another user's mentor listing.",
+      });
+    }
+
+    const { headline, hourly_rate, availability, is_active } = request.body;
+
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable." });
+    }
+
+    const cleanHeadline = headline !== undefined ? String(headline).trim() : "Available Peer Mentor";
+    const cleanRate = hourly_rate !== undefined ? parseFloat(hourly_rate) || 0.0 : 0.0;
+    const cleanAvail = availability !== undefined ? String(availability).trim() : "Flexible / Weekends & Evenings";
+    const cleanActive = is_active !== undefined ? Boolean(is_active) : true;
+
+    const client = await pool.connect();
+    let listingRow;
+    let notificationsSent = [];
+
+    try {
+      await client.query("BEGIN");
+
+      const upsertRes = await client.query(
+        `INSERT INTO mentor_listings (user_id, headline, hourly_rate, availability, is_active, updated_at)
+         VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+         ON CONFLICT (user_id) DO UPDATE SET
+           headline = EXCLUDED.headline,
+           hourly_rate = EXCLUDED.hourly_rate,
+           availability = EXCLUDED.availability,
+           is_active = EXCLUDED.is_active,
+           updated_at = CURRENT_TIMESTAMP
+         RETURNING id, user_id, headline, hourly_rate, availability, is_active, created_at, updated_at`,
+        [targetUserId, cleanHeadline, cleanRate, cleanAvail, cleanActive]
+      );
+      listingRow = upsertRes.rows[0];
+
+      // If mentor listing is active, notify learners who requested skills this mentor teaches
+      if (cleanActive) {
+        const mentorUserRes = await client.query("SELECT name FROM users WHERE id = $1", [targetUserId]);
+        const mentorName = mentorUserRes.rows[0]?.name || "A mentor";
+
+        const teachSkillsRes = await client.query(
+          "SELECT skill_name FROM skills WHERE user_id = $1 AND type = 'teach'",
+          [targetUserId]
+        );
+        const teachSkills = teachSkillsRes.rows.map((r) => r.skill_name);
+
+        notificationsSent = await matchSkillsAndNotifyLearners(
+          client,
+          targetUserId,
+          mentorName,
+          teachSkills
+        );
+      }
+
+      await client.query("COMMIT");
+    } catch (txErr) {
+      await client.query("ROLLBACK");
+      throw txErr;
+    } finally {
+      client.release();
+    }
+
+    return response.status(200).json({
+      message: "Mentor listing saved successfully.",
+      listing: listingRow,
+      notificationsSentCount: notificationsSent.length,
+    });
+  } catch (error) {
+    console.error("Error saving mentor listing:", error);
+    return response.status(500).json({
+      error: "An internal server error occurred while saving mentor listing.",
+      details: error.message,
+    });
+  }
+};
+
+application.post("/api/mentor-listings", authenticateToken, upsertMentorListingHandler);
+application.put("/api/mentor-listings", authenticateToken, upsertMentorListingHandler);
+application.put("/api/users/:userId/mentor-listing", authenticateToken, upsertMentorListingHandler);
+
+/**
+ * ENDPOINT: GET /api/mentor-listings/my
+ * Returns the authenticated user's mentor listing.
+ */
+application.get("/api/mentor-listings/my", authenticateToken, async (request, response) => {
+  try {
+    const userId = request.user.userId;
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable." });
+    }
+
+    const res = await query("SELECT * FROM mentor_listings WHERE user_id = $1", [userId]);
+    if (res.rows.length === 0) {
+      return response.status(404).json({ error: "Mentor listing not found for current user." });
+    }
+    return response.status(200).json({ listing: res.rows[0] });
+  } catch (error) {
+    return response.status(500).json({ error: "An error occurred fetching mentor listing." });
+  }
+});
+
+/**
+ * ENDPOINT: GET /api/mentor-listings/:userId
+ * Returns a specific user's public mentor listing.
+ */
+application.get("/api/mentor-listings/:userId", async (request, response) => {
+  try {
+    const targetUserId = request.params.userId;
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable." });
+    }
+
+    const res = await query("SELECT * FROM mentor_listings WHERE user_id = $1", [targetUserId]);
+    if (res.rows.length === 0) {
+      return response.status(404).json({ error: "Mentor listing not found." });
+    }
+    return response.status(200).json({ listing: res.rows[0] });
+  } catch (error) {
+    return response.status(500).json({ error: "An error occurred fetching mentor listing." });
   }
 });
 
