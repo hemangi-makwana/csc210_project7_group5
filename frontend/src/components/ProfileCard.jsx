@@ -93,10 +93,30 @@ export function ProfileCard({ user, matchScore = null, matchReason = null }) {
             taughtSkills.map((skill, index) => {
               const skillName = typeof skill === 'string' ? skill : skill.skill_name;
               const skillLevel = typeof skill === 'string' ? user.level : skill.level;
+              const isVerified = typeof skill === 'object' && Boolean(skill.is_verified);
               return (
                 <span key={skill.id || index} className="chip">
-                  {skillName}
+                  <span>{skillName}</span>
                   {skillLevel && <span className="chip-level">{skillLevel}</span>}
+                  {isVerified && (
+                    <span
+                      className="badge badge-professional"
+                      style={{
+                        marginLeft: '0.35rem',
+                        padding: '0.15rem 0.4rem',
+                        fontSize: '0.72rem',
+                        fontWeight: '700',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '2px',
+                        backgroundColor: '#16a34a',
+                        color: '#ffffff',
+                      }}
+                      title="Verified Teacher: Qualified via domain-specific skill quiz"
+                    >
+                      ✓ Verified
+                    </span>
+                  )}
                 </span>
               );
             })

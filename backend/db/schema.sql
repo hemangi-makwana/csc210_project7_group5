@@ -45,8 +45,13 @@ CREATE TABLE IF NOT EXISTS skills (
   type        VARCHAR(20) NOT NULL DEFAULT 'teach'
               CHECK (type IN ('teach', 'learn')),
   created_at  TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  is_verified BOOLEAN DEFAULT FALSE,
+  verified_at TIMESTAMP WITH TIME ZONE,
   CONSTRAINT uq_user_skill_type UNIQUE (user_id, skill_name, type)
 );
+
+ALTER TABLE skills ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE;
+ALTER TABLE skills ADD COLUMN IF NOT EXISTS verified_at TIMESTAMP WITH TIME ZONE;
 
 -- 3. MENTOR LISTINGS
 -- Dedicated directory entries for mentors with availability and rates.
@@ -117,11 +122,25 @@ CREATE TABLE IF NOT EXISTS reviews (
   created_at  TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 8. TEACHER VERIFICATION QUIZ ATTEMPTS
+-- Tracks skill verification quiz sessions, scores, and outcomes.
+CREATE TABLE IF NOT EXISTS quiz_attempts (
+  id           SERIAL PRIMARY KEY,
+  user_id      VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  skill_name   VARCHAR(100) NOT NULL,
+  score        INT NOT NULL,
+  total        INT NOT NULL DEFAULT 10,
+  percentage   NUMERIC(5, 2) NOT NULL,
+  passed       BOOLEAN NOT NULL,
+  created_at   TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
 -- ============================================================================
 -- PERFORMANCE INDEXES
 -- ============================================================================
 CREATE INDEX IF NOT EXISTS idx_skills_lookup ON skills (LOWER(skill_name), type);
 CREATE INDEX IF NOT EXISTS idx_skills_user ON skills (user_id);
+CREATE INDEX IF NOT EXISTS idx_skills_verified ON skills (user_id, is_verified);
 CREATE INDEX IF NOT EXISTS idx_mentor_listings_active ON mentor_listings (is_active);
 CREATE INDEX IF NOT EXISTS idx_session_bookings_mentor ON session_bookings (mentor_id);
 CREATE INDEX IF NOT EXISTS idx_session_bookings_learner ON session_bookings (learner_id);
@@ -133,3 +152,5 @@ CREATE INDEX IF NOT EXISTS idx_course_requests_title ON course_requests (LOWER(t
 CREATE INDEX IF NOT EXISTS idx_course_requests_requester ON course_requests (requester_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications (user_id);
 CREATE INDEX IF NOT EXISTS idx_users_username ON users (LOWER(username));
+CREATE INDEX IF NOT EXISTS idx_quiz_attempts_user ON quiz_attempts (user_id);
+CREATE INDEX IF NOT EXISTS idx_quiz_attempts_user_skill ON quiz_attempts (user_id, LOWER(skill_name));

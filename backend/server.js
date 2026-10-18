@@ -42,6 +42,25 @@ const Graph = require("./dsa/graph");
 const MaxHeap = require("./dsa/heap");
 const { pool, query, checkConnection, isPoolInitialized } = require("./db/index");
 const { setupDatabase } = require("./db/setup");
+const {
+  hasQuestionBank,
+  generateQuiz,
+  getQuestionDetails,
+  getSupportedSkills,
+} = require("./quizzes/questionBanks");
+
+// In-memory active quiz sessions Map: quizId -> { quizId, userId, skillName, answerKey, clientQuestions, expiresAt }
+const activeQuizSessions = new Map();
+
+// Periodic cleanup of expired quiz sessions (older than 1 hour)
+setInterval(() => {
+  const now = Date.now();
+  for (const [quizId, session] of activeQuizSessions.entries()) {
+    if (session.expiresAt && session.expiresAt < now) {
+      activeQuizSessions.delete(quizId);
+    }
+  }
+}, 10 * 60 * 1000);
 
 // JWT signing secret — loaded from backend/.env, never hardcoded.
 // If missing, auth routes will return 500 rather than sign a token with no secret.
@@ -779,7 +798,13 @@ application.get("/api/users/all", async (request, response) => {
     if (conn.reachable) {
       const dbResult = await query(`
         SELECT u.id, u.name, u.role, u.bio, u.reputation_score,
-               COALESCE(array_agg(s.skill_name) FILTER (WHERE s.type = 'teach' AND s.skill_name IS NOT NULL), '{}') as skills
+               COALESCE(array_agg(s.skill_name) FILTER (WHERE s.type = 'teach' AND s.skill_name IS NOT NULL), '{}') as skills,
+               COALESCE(
+                 json_agg(
+                   json_build_object('skill_name', s.skill_name, 'level', s.level, 'type', s.type, 'is_verified', COALESCE(s.is_verified, FALSE), 'verified_at', s.verified_at)
+                 ) FILTER (WHERE s.type = 'teach' AND s.skill_name IS NOT NULL),
+                 '[]'
+               ) as skill_entries
         FROM users u
         LEFT JOIN skills s ON u.id = s.user_id
         GROUP BY u.id, u.name, u.role, u.bio, u.reputation_score
@@ -792,7 +817,7 @@ application.get("/api/users/all", async (request, response) => {
           userId: row.id,
           name: row.name,
           role: row.role || "Peer Mentor",
-          skills: row.skills || [],
+          skills: row.skill_entries && row.skill_entries.length > 0 ? row.skill_entries : (row.skills || []),
           bio: row.bio || "",
           reputationScore: parseFloat(row.reputation_score) || 5.0,
         }));
@@ -930,6 +955,18 @@ application.put("/api/users/:userId/skills", async (request, response) => {
         updateVals
       );
 
+      // Fetch existing verified skills before deleting so verification badge is not lost
+      const existingVerified = await client.query(
+        `SELECT LOWER(skill_name) as lower_skill, is_verified, verified_at 
+         FROM skills 
+         WHERE user_id = $1 AND is_verified = TRUE`,
+        [targetUserId]
+      );
+      const verifiedMap = new Map();
+      for (const v of existingVerified.rows) {
+        verifiedMap.set(v.lower_skill, { is_verified: true, verified_at: v.verified_at });
+      }
+
       // Delete existing skills for this user and insert updated list
       await client.query(`DELETE FROM skills WHERE user_id = $1`, [targetUserId]);
 
@@ -940,11 +977,20 @@ application.put("/api/users/:userId/skills", async (request, response) => {
         const type = skill.type || "teach";
 
         if (skillName) {
+          const lowerName = skillName.trim().toLowerCase();
+          const isVerified = type === "teach" && (Boolean(skill.is_verified) || verifiedMap.has(lowerName));
+          const verifiedAt = isVerified
+            ? (verifiedMap.get(lowerName)?.verified_at || new Date())
+            : null;
+
           await client.query(
-            `INSERT INTO skills (user_id, skill_name, level, type)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT ON CONSTRAINT uq_user_skill_type DO NOTHING`,
-            [targetUserId, skillName, level, type]
+            `INSERT INTO skills (user_id, skill_name, level, type, is_verified, verified_at)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT ON CONSTRAINT uq_user_skill_type DO UPDATE SET
+               level = EXCLUDED.level,
+               is_verified = EXCLUDED.is_verified,
+               verified_at = EXCLUDED.verified_at`,
+            [targetUserId, skillName, level, type, isVerified, verifiedAt]
           );
 
           if (type === "teach") {
@@ -953,11 +999,15 @@ application.put("/api/users/:userId/skills", async (request, response) => {
         }
       }
 
-      // Fetch refreshed user record directly from database
+      // Fetch refreshed user record and skills directly from database
       const userRes = await client.query(
         `SELECT id, name, email, username, role, bio, profile_summary, specialization_domain,
                 work_experience, social_profiles, avatar_url, reputation_score
          FROM users WHERE id = $1`,
+        [targetUserId]
+      );
+      const userSkillsRes = await client.query(
+        `SELECT id, skill_name, level, type, is_verified, verified_at FROM skills WHERE user_id = $1 ORDER BY id`,
         [targetUserId]
       );
       const row = userRes.rows[0] || {
@@ -980,8 +1030,8 @@ application.put("/api/users/:userId/skills", async (request, response) => {
         social_profiles: row.social_profiles || {},
         avatar_url: row.avatar_url || null,
         reputationScore: parseFloat(row.reputation_score) || 5.0,
-        skills: incomingSkills.filter((s) => s.type === "teach").map((s) => s.skill_name || s.skillName),
-        skillEntries: incomingSkills,
+        skills: userSkillsRes.rows,
+        skillEntries: userSkillsRes.rows,
       };
 
       // When teachable skills are added, match open course requests and notify requesting learners
@@ -1206,7 +1256,7 @@ application.put("/api/users/:userId/profile", authenticateToken, async (request,
 
     // Fetch user skills
     const skillsRes = await query(
-      `SELECT id, skill_name, level, type FROM skills WHERE user_id = $1 ORDER BY id`,
+      `SELECT id, skill_name, level, type, is_verified, verified_at FROM skills WHERE user_id = $1 ORDER BY id`,
       [targetUserId]
     );
 
@@ -1255,7 +1305,7 @@ application.get("/api/users/:userId/profile", async (request, response) => {
                 u.reputation_score,
                 COALESCE(
                   json_agg(
-                    json_build_object('id', s.id, 'skill_name', s.skill_name, 'level', s.level, 'type', s.type)
+                    json_build_object('id', s.id, 'skill_name', s.skill_name, 'level', s.level, 'type', s.type, 'is_verified', COALESCE(s.is_verified, FALSE), 'verified_at', s.verified_at)
                   ) FILTER (WHERE s.id IS NOT NULL),
                   '[]'
                 ) as skills
@@ -1318,7 +1368,7 @@ application.get("/api/users/:userId", async (request, response) => {
                 u.reputation_score,
                 COALESCE(
                   json_agg(
-                    json_build_object('id', s.id, 'skill_name', s.skill_name, 'level', s.level, 'type', s.type)
+                    json_build_object('id', s.id, 'skill_name', s.skill_name, 'level', s.level, 'type', s.type, 'is_verified', COALESCE(s.is_verified, FALSE), 'verified_at', s.verified_at)
                   ) FILTER (WHERE s.id IS NOT NULL),
                   '[]'
                 ) as skills
@@ -2266,6 +2316,348 @@ application.get("/api/mentor-listings/:userId", async (request, response) => {
 });
 
 // ----------------------------------------------------------------------------
+// SKILL VERIFICATION QUIZ ENDPOINTS (PostgreSQL-backed & JWT-authorized)
+// ----------------------------------------------------------------------------
+
+/**
+ * ENDPOINT: GET /api/quizzes/supported-skills
+ * Returns the list of skills that currently offer a curated qualification quiz.
+ */
+application.get("/api/quizzes/supported-skills", (request, response) => {
+  const supported = getSupportedSkills();
+  return response.status(200).json({
+    supportedSkills: supported,
+    count: supported.length,
+    description: "Curated 10-question verification quizzes with checked answer keys.",
+  });
+});
+
+/**
+ * ENDPOINT: POST /api/quizzes/start
+ * Starts a 10-question multiple choice teacher verification quiz for the specified skill.
+ *
+ * Requirements:
+ * - Requires JWT authentication (request.user.userId).
+ * - Checks if the selected skill has a curated question bank.
+ * - If not available: returns 404 with an explanation that no quiz is available yet (no generic questions).
+ * - Randomly selects 10 distinct questions from the skill's question bank.
+ * - Randomizes option order for every question.
+ * - Keeps correct answers server-side; NEVER leaks answer key or preselected answers to client.
+ */
+application.post("/api/quizzes/start", authenticateToken, (request, response) => {
+  try {
+    const { skillName } = request.body;
+
+    if (!skillName || typeof skillName !== "string" || skillName.trim() === "") {
+      return response.status(400).json({
+        error: "Skill name is required to start a verification quiz.",
+      });
+    }
+
+    const cleanSkill = skillName.trim();
+
+    // Check if question bank is available for this skill
+    if (!hasQuestionBank(cleanSkill)) {
+      const supportedList = getSupportedSkills()
+        .map((s) => s.split(" ").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "))
+        .join(", ");
+      return response.status(404).json({
+        available: false,
+        error: `A verification quiz is not available for "${cleanSkill}" yet.`,
+        message: `A verification quiz is not available for "${cleanSkill}" yet. Curated qualification quizzes with domain-specific questions are currently supported for: ${supportedList}. Verified teacher badges are only awarded for skills with curated qualification quizzes.`,
+        skillName: cleanSkill,
+        supportedSkills: getSupportedSkills(),
+      });
+    }
+
+    // Generate 10-question quiz with randomized options and distinct questions
+    const generated = generateQuiz(cleanSkill);
+    if (!generated) {
+      return response.status(500).json({
+        error: `Failed to generate quiz for "${cleanSkill}". Insufficient questions in bank.`,
+      });
+    }
+
+    const quizId = `quiz_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+    // Store session server-side with 1 hour expiration
+    activeQuizSessions.set(quizId, {
+      quizId,
+      userId: request.user.userId,
+      skillName: cleanSkill,
+      answerKey: generated.answerKey,
+      clientQuestions: generated.clientQuestions,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 60 * 60 * 1000,
+    });
+
+    return response.status(200).json({
+      quizId,
+      skillName: cleanSkill,
+      totalQuestions: generated.clientQuestions.length,
+      passingScore: 5,
+      passingPercentage: 50,
+      questions: generated.clientQuestions, // Client receives NO correct answers and NO preselected answers
+    });
+  } catch (error) {
+    console.error("Error starting quiz:", error);
+    return response.status(500).json({
+      error: "An internal server error occurred while starting the quiz.",
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * ENDPOINT: POST /api/quizzes/submit
+ * Grades the submitted quiz on the server and records the attempt in PostgreSQL.
+ *
+ * Requirements:
+ * - Uses JWT identity for authorization; never trusts user ID from request body.
+ * - Scores result out of 10 and percentage.
+ * - Score of 5/10 or higher qualifies user as verified teacher for that specific skill.
+ * - Score below 5/10 shows result and supportive message:
+ *   "You didn’t pass this time. Review the skill and try again when you’re ready." and allows retake.
+ * - Persists attempt into quiz_attempts table.
+ * - On pass (score >= 5): marks is_verified = TRUE in skills table and issues in-app notification.
+ */
+application.post("/api/quizzes/submit", authenticateToken, async (request, response) => {
+  try {
+    const userId = request.user.userId; // Strictly from JWT
+    const { quizId, skillName, answers } = request.body;
+
+    if (!skillName || typeof skillName !== "string" || skillName.trim() === "") {
+      return response.status(400).json({
+        error: "Skill name is required to submit a quiz.",
+      });
+    }
+
+    const cleanSkill = skillName.trim();
+
+    if (!hasQuestionBank(cleanSkill)) {
+      return response.status(404).json({
+        error: `A verification quiz is not available for "${cleanSkill}" yet.`,
+      });
+    }
+
+    if (!answers || typeof answers !== "object") {
+      return response.status(400).json({
+        error: "Submitted answers are required.",
+      });
+    }
+
+    // Retrieve active session or reconstruct answer lookup
+    const session = activeQuizSessions.get(quizId);
+    if (session && session.userId !== userId) {
+      return response.status(403).json({
+        error: "Forbidden: You are not authorized to submit this quiz session.",
+      });
+    }
+
+    // Determine the questions to grade
+    let questionsToGrade = [];
+    if (session && session.clientQuestions) {
+      questionsToGrade = session.clientQuestions;
+    } else {
+      // If session expired, grade submitted question IDs that exist in the bank
+      const submittedQIds = Array.isArray(answers) ? answers.map((a) => a.questionId) : Object.keys(answers);
+      questionsToGrade = submittedQIds
+        .map((qId) => {
+          const q = getQuestionDetails(cleanSkill, qId);
+          return q ? { id: q.id, question: q.question } : null;
+        })
+        .filter(Boolean);
+    }
+
+    if (questionsToGrade.length === 0) {
+      return response.status(400).json({
+        error: "No valid questions were submitted for grading.",
+      });
+    }
+
+    // Grade each question server-side
+    let score = 0;
+    const total = 10; // Quizzes are standard 10 questions
+    const questionResults = [];
+
+    for (const q of questionsToGrade) {
+      let chosenAnswer = "";
+      if (Array.isArray(answers)) {
+        const found = answers.find((a) => a.questionId === q.id);
+        chosenAnswer = found ? String(found.answer || "").trim() : "";
+      } else {
+        chosenAnswer = answers[q.id] ? String(answers[q.id]).trim() : "";
+      }
+
+      let questionDetail = null;
+      if (session && session.answerKey && session.answerKey.has(q.id)) {
+        questionDetail = session.answerKey.get(q.id);
+      } else {
+        questionDetail = getQuestionDetails(cleanSkill, q.id);
+      }
+
+      const correctAnswer = questionDetail ? questionDetail.correctAnswer : "";
+      const explanation = questionDetail ? questionDetail.explanation : "";
+      const isCorrect = Boolean(correctAnswer && chosenAnswer && chosenAnswer === correctAnswer);
+
+      if (isCorrect) {
+        score += 1;
+      }
+
+      questionResults.push({
+        questionId: q.id,
+        question: q.question,
+        chosenAnswer: chosenAnswer || "(No answer selected)",
+        correctAnswer,
+        isCorrect,
+        explanation,
+      });
+    }
+
+    const percentage = Math.round((score / total) * 100);
+    const passed = score >= 5;
+
+    // Database persistence
+    const conn = await checkConnection();
+    let attemptRecord = null;
+
+    if (conn.reachable) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        // Save attempt to quiz_attempts
+        const attemptRes = await client.query(
+          `INSERT INTO quiz_attempts (user_id, skill_name, score, total, percentage, passed)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING id, user_id, skill_name, score, total, percentage, passed, created_at`,
+          [userId, cleanSkill, score, total, percentage, passed]
+        );
+        attemptRecord = attemptRes.rows[0];
+
+        // If passed (score >= 5), mark skill as verified in skills table
+        if (passed) {
+          // Check if the user already has this skill listed as teachable
+          const skillCheck = await client.query(
+            `SELECT id FROM skills WHERE user_id = $1 AND LOWER(skill_name) = LOWER($2) AND type = 'teach'`,
+            [userId, cleanSkill]
+          );
+
+          if (skillCheck.rows.length > 0) {
+            await client.query(
+              `UPDATE skills
+               SET is_verified = TRUE, verified_at = CURRENT_TIMESTAMP
+               WHERE user_id = $1 AND LOWER(skill_name) = LOWER($2) AND type = 'teach'`,
+              [userId, cleanSkill]
+            );
+          } else {
+            // If they haven't saved this skill to their profile yet, insert verified teachable skill
+            await client.query(
+              `INSERT INTO skills (user_id, skill_name, level, type, is_verified, verified_at)
+               VALUES ($1, $2, 'intermediate', 'teach', TRUE, CURRENT_TIMESTAMP)
+               ON CONFLICT ON CONSTRAINT uq_user_skill_type DO UPDATE SET
+                 is_verified = TRUE,
+                 verified_at = CURRENT_TIMESTAMP`,
+              [userId, cleanSkill]
+            );
+          }
+
+          // Create an in-app celebration notification
+          await client.query(
+            `INSERT INTO notifications (user_id, type, title, message, link)
+             VALUES ($1, 'quiz_passed', $2, $3, '/profile')`,
+            [
+              userId,
+              `✓ Verified Teacher: ${cleanSkill}`,
+              `Congratulations! You passed the ${cleanSkill} teacher verification quiz with a score of ${score}/10 (${percentage}%). You are now a verified teacher for this skill!`,
+            ]
+          ).catch(() => {});
+        }
+
+        await client.query("COMMIT");
+      } catch (dbErr) {
+        await client.query("ROLLBACK");
+        console.error("Error saving quiz attempt to database:", dbErr);
+      } finally {
+        client.release();
+      }
+    }
+
+    // Clean up active session
+    if (quizId) {
+      activeQuizSessions.delete(quizId);
+    }
+
+    const message = passed
+      ? `Congratulations! You passed the ${cleanSkill} verification quiz with a score of ${score}/10 (${percentage}%). You have earned the Verified Teacher badge!`
+      : `You didn’t pass this time. Review the skill and try again when you’re ready.`;
+
+    return response.status(200).json({
+      quizId,
+      skillName: cleanSkill,
+      score,
+      total,
+      percentage,
+      passed,
+      qualifiesAsTeacher: passed,
+      scoreDisplay: `${score}/${total} (${percentage}%)`,
+      message,
+      results: questionResults,
+      attemptId: attemptRecord ? attemptRecord.id : null,
+    });
+  } catch (error) {
+    console.error("Error submitting quiz:", error);
+    return response.status(500).json({
+      error: "An internal server error occurred while grading the quiz.",
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * ENDPOINT: GET /api/quizzes/attempts/my
+ * Retrieves past quiz attempts and verified skills for the authenticated user.
+ */
+application.get("/api/quizzes/attempts/my", authenticateToken, async (request, response) => {
+  try {
+    const userId = request.user.userId;
+    const conn = await checkConnection();
+
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable." });
+    }
+
+    const attemptsRes = await query(
+      `SELECT id, skill_name, score, total, percentage, passed, created_at
+       FROM quiz_attempts
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT 50`,
+      [userId]
+    );
+
+    const verifiedSkillsRes = await query(
+      `SELECT id, skill_name, level, verified_at
+       FROM skills
+       WHERE user_id = $1 AND is_verified = TRUE AND type = 'teach'
+       ORDER BY verified_at DESC`,
+      [userId]
+    );
+
+    return response.status(200).json({
+      attempts: attemptsRes.rows || [],
+      verifiedSkills: verifiedSkillsRes.rows || [],
+    });
+  } catch (error) {
+    console.error("Error retrieving user quiz attempts:", error);
+    return response.status(500).json({
+      error: "An internal server error occurred while retrieving quiz attempts.",
+      details: error.message,
+    });
+  }
+});
+
+// ----------------------------------------------------------------------------
 // AUTHENTICATION ENDPOINTS (PostgreSQL-backed)
 // ----------------------------------------------------------------------------
 
@@ -2449,7 +2841,7 @@ application.post("/api/auth/login", async (request, response) => {
               u.username, u.profile_summary, u.specialization_domain, u.work_experience, u.social_profiles, u.avatar_url,
               COALESCE(
                 json_agg(
-                  json_build_object('id', s.id, 'skill_name', s.skill_name, 'level', s.level, 'type', s.type)
+                  json_build_object('id', s.id, 'skill_name', s.skill_name, 'level', s.level, 'type', s.type, 'is_verified', COALESCE(s.is_verified, FALSE), 'verified_at', s.verified_at)
                 ) FILTER (WHERE s.id IS NOT NULL),
                 '[]'
               ) as skills
@@ -2570,4 +2962,5 @@ module.exports = {
   seedDatabase,
   sortMentorsByLevel,
   initializeDatabaseAndDsa,
+  activeQuizSessions,
 };
