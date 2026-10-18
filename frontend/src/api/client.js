@@ -274,16 +274,11 @@ export async function request(endpoint, options = {}) {
     const data = await response.json();
     return data;
   } catch (networkError) {
-    // Auth endpoints: always re-throw — no mock fallback allowed
-    if (isAuthEndpoint) {
-      throw networkError;
-    }
-
-    // All other endpoints: fall back to built-in simulation for demo resilience
-    console.warn(
-      `[API Client] Backend unreachable at "${API_BASE_URL}${endpoint}". Falling back to demo mock data.`,
+    // Surface real network/server errors to caller — do not silently replace with mock success
+    console.error(
+      `[API Client Error] ${options.method || 'GET'} ${API_BASE_URL}${endpoint}:`,
       networkError.message
     );
-    return handleMockFallback(endpoint, options);
+    throw networkError;
   }
 }

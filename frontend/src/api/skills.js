@@ -67,3 +67,17 @@ export async function updateSkills(userId, skillsData) {
     body: JSON.stringify(payload),
   });
 }
+
+/**
+ * Updates a user's full profile including active_mode, can_teach, can_learn, bio, etc.
+ * Persists directly to PostgreSQL users table via authenticated PUT /api/users/:userId/profile.
+ * @param {string} userId - ID of user.
+ * @param {object} profileData - Profile updates.
+ */
+export async function updateUserProfile(userId, profileData) {
+  return await request(`/users/${userId}/profile`, {
+    method: 'PUT',
+    body: JSON.stringify(profileData),
+  });
+}
+

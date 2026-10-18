@@ -2,24 +2,15 @@
  * ============================================================================
  * SearchBar Component (src/components/SearchBar.jsx)
  * ============================================================================
- * WHAT THIS FILE DOES:
- * - Provides a search input field with submit and clear buttons.
- * - Used in MentorSearch to query mentors by skill keyword.
- *
- * PROPS:
- * - initialValue: String to pre-populate in the input.
- * - onSearch: Function called with the query string when user submits search.
- * - placeholder: Placeholder text for the input box.
+ * Search input field with submit and clear buttons without decorative emojis.
  */
 
 import React, { useState } from 'react';
+import { SearchIcon, CloseIcon } from './Icons.jsx';
 
-export function SearchBar({ initialValue = '', onSearch, placeholder = 'Search by skill (e.g. Python, React, Machine Learning)...' }) {
+export function SearchBar({ initialValue = '', onSearch, placeholder = 'Search by skill (e.g. Python, React, Data Structures)...' }) {
   const [searchTerm, setSearchTerm] = useState(initialValue);
 
-  /**
-   * Handles form submission when user clicks Search or presses Enter.
-   */
   function handleSubmit(event) {
     event.preventDefault();
     if (onSearch) {
@@ -27,9 +18,6 @@ export function SearchBar({ initialValue = '', onSearch, placeholder = 'Search b
     }
   }
 
-  /**
-   * Clears search input and notifies parent component.
-   */
   function handleClear() {
     setSearchTerm('');
     if (onSearch) {
@@ -59,19 +47,21 @@ export function SearchBar({ initialValue = '', onSearch, placeholder = 'Search b
               transform: 'translateY(-50%)',
               background: 'none',
               border: 'none',
-              color: '#94a3b8',
+              color: 'var(--color-text-muted)',
               cursor: 'pointer',
-              fontSize: '1.1rem',
+              display: 'flex',
+              alignItems: 'center',
             }}
             title="Clear search"
           >
-            ✕
+            <CloseIcon size={16} />
           </button>
         )}
       </div>
 
-      <button type="submit" className="btn btn-primary">
-        🔍 Search
+      <button type="submit" className="btn btn-primary" style={{ gap: '0.5rem' }}>
+        <SearchIcon size={18} />
+        <span>Search</span>
       </button>
     </form>
   );

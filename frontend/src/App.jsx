@@ -3,59 +3,96 @@
  * Root Application Component (src/App.jsx)
  * ============================================================================
  * WHAT THIS FILE DOES:
- * - Defines client-side routing using react-router-dom Routes and Route.
- * - Wraps all views in a consistent application layout with Navbar and Footer.
- *
- * ROUTES CONFIGURED:
- * - /               -> Home (Dashboard & feature summary)
- * - /search         -> MentorSearch (Keyword-based mentor discovery)
- * - /recommendations-> Recommendations (Algorithmic priority queue suggestions)
- * - /booking        -> SessionBooking (FIFO queue booking scheduling)
- * - /history        -> LearningHistory (Completed sessions & peer reviews)
- * - /profile        -> SkillProfile (Personal taught/wanted skill management)
- * - /login          -> Login (Authentication & JWT issuance)
+ * - Manages application layout with responsive left Sidebar and TopHeader.
+ * - Handles client-side routing.
+ * - When an unauthenticated user opens '/', renders Login first with prominent brand banner.
+ * - After successful login, renders the Dashboard with summary cards.
+ * - Left sidebar navigation replaces the old top navbar.
  */
 
-import React from 'react';
-import { Routes, Route } from 'react-router-dom';
-import { Navbar } from './components/Navbar.jsx';
+import React, { useState } from 'react';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { useAuth } from './context/AuthContext.jsx';
+import { BRAND } from './constants/brand.js';
+import { Sidebar } from './components/Sidebar.jsx';
+import { TopHeader } from './components/TopHeader.jsx';
 import { Home } from './pages/Home.jsx';
 import { MentorSearch } from './pages/MentorSearch.jsx';
 import { Recommendations } from './pages/Recommendations.jsx';
 import { SessionBooking } from './pages/SessionBooking.jsx';
 import { LearningHistory } from './pages/LearningHistory.jsx';
 import { SkillProfile } from './pages/SkillProfile.jsx';
+import { CourseRequests } from './pages/CourseRequests.jsx';
+import { Notifications } from './pages/Notifications.jsx';
 import { Login } from './pages/Login.jsx';
 import { Register } from './pages/Register.jsx';
 
 export function App() {
+  const { isAuthenticated, isLoading } = useAuth();
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const location = useLocation();
+
+  // Pure auth routes that use full-screen banner layout
+  const isAuthRoute = location.pathname === '/login' || location.pathname === '/register';
+
+  // If unauthenticated user opens root '/', display Login directly
+  const showLoginAtRoot = !isLoading && !isAuthenticated && location.pathname === '/';
+
+  if (isAuthRoute || showLoginAtRoot) {
+    return (
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+        <Route path="/" element={<Login />} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
+      </Routes>
+    );
+  }
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
-      {/* Top Global Navigation Bar */}
-      <Navbar />
+    <div className="app-shell">
+      {/* Left Navigation Sidebar */}
+      <Sidebar
+        isOpen={isSidebarOpen}
+        onClose={() => setIsSidebarOpen(false)}
+      />
 
-      {/* Main Page Content Router */}
-      <main style={{ flex: 1 }}>
-        <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/search" element={<MentorSearch />} />
-          <Route path="/recommendations" element={<Recommendations />} />
-          <Route path="/booking" element={<SessionBooking />} />
-          <Route path="/history" element={<LearningHistory />} />
-          <Route path="/profile" element={<SkillProfile />} />
-          <Route path="/login" element={<Login />} />
-          <Route path="/register" element={<Register />} />
-          {/* Fallback route for unknown URLs */}
-          <Route path="*" element={<Home />} />
-        </Routes>
-      </main>
+      {/* Main App Workspace */}
+      <div className="main-wrapper">
+        {/* Top Header with Mode Switcher & Profile */}
+        <TopHeader onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)} />
 
-      {/* Global Footer */}
-      <footer className="footer">
-        <p>
-          🎓 <strong>CSC210 Group 5</strong> — Local Skill Exchange & Community Learning Platform &copy; 2026
-        </p>
-      </footer>
+        {/* Dynamic Route Content */}
+        <main style={{ flex: 1 }}>
+          <Routes>
+            <Route path="/" element={<Home />} />
+            <Route path="/search" element={<MentorSearch />} />
+            <Route path="/recommendations" element={<Recommendations />} />
+            <Route path="/booking" element={<SessionBooking />} />
+            <Route path="/history" element={<LearningHistory />} />
+            <Route path="/profile" element={<SkillProfile />} />
+            <Route path="/requests" element={<CourseRequests />} />
+            <Route path="/notifications" element={<Notifications />} />
+            <Route path="/login" element={<Navigate to="/" replace />} />
+            <Route path="/register" element={<Navigate to="/" replace />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </main>
+
+        {/* Global Clean Dark Footer */}
+        <footer style={{
+          padding: '1.5rem 2rem',
+          borderTop: '1px solid var(--color-border)',
+          backgroundColor: 'var(--color-bg-secondary)',
+          textAlign: 'center',
+          color: 'var(--color-text-muted)',
+          fontSize: '0.85rem'
+        }}>
+          <p>
+            {BRAND.footerText} &copy; {new Date().getFullYear()}
+          </p>
+        </footer>
+      </div>
     </div>
   );
 }

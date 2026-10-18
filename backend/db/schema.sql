@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS users (
   specialization_domain VARCHAR(255),
   work_experience  JSONB DEFAULT '[]'::jsonb,
   social_profiles  JSONB DEFAULT '{}'::jsonb,
+  active_mode      VARCHAR(20) DEFAULT 'learner'
+                   CHECK (active_mode IN ('learner', 'teacher')),
+  can_teach        BOOLEAN DEFAULT TRUE,
+  can_learn        BOOLEAN DEFAULT TRUE,
   created_at       TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   updated_at       TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -32,6 +36,9 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_summary TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS specialization_domain VARCHAR(255);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS work_experience JSONB DEFAULT '[]'::jsonb;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS social_profiles JSONB DEFAULT '{}'::jsonb;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS active_mode VARCHAR(20) DEFAULT 'learner';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS can_teach BOOLEAN DEFAULT TRUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS can_learn BOOLEAN DEFAULT TRUE;
 
 -- 2. TEACHING & LEARNING SKILLS
 -- Stores each skill associated with a user, categorized by proficiency

@@ -2,41 +2,46 @@
  * ============================================================================
  * Skill Profile Page (src/pages/SkillProfile.jsx)
  * ============================================================================
- * WHAT THIS FILE DOES:
- * - Allows the logged-in user to view and edit their profile, including:
- *   1. Short Bio / Headline
- *   2. Skills they can teach (skill name + level: beginner, intermediate, expert)
- *   3. Skills they want to learn
- * - Connects to the updateSkills(userId, skills) function in src/api/skills.js.
- * - Reuses existing CSS classes (.form, .btn, .chip, .card, etc.) for visual consistency.
- * - Manages loading, error, success, and demo mock states.
- *
- * BACKEND DSA CONNECTION:
- * - When skills are updated here, the backend updates its internal Hash Table
- *   Skill Index and modifies user node properties in the Mentor Network Graph.
+ * Redesigned with dark blue palette and consistent SVG icons.
+ * Allows users to manage:
+ * 1. Bio & Professional Summary
+ * 2. Teachable Skills with teacher verification quiz workflow
+ * 3. Verified teacher badges (strictly from API `is_verified`)
+ * 4. Wanted skills for peer learning
+ * 5. Learning & Teaching role capabilities
  */
 
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
-import { getUserProfile, updateSkills } from '../api/skills.js';
+import { getUserProfile, updateSkills, updateUserProfile } from '../api/skills.js';
 import { startVerificationQuiz, submitVerificationQuiz } from '../api/quizzes.js';
-import { Loader, ErrorState, SuccessState, DemoBanner } from '../components/Feedback.jsx';
+import { Loader, ErrorState, SuccessState } from '../components/Feedback.jsx';
+import {
+  UserIcon,
+  SkillsIcon,
+  VerifiedBadgeIcon,
+  QuizIcon,
+  CheckIcon,
+  CloseIcon,
+  SwitchModeIcon,
+} from '../components/Icons.jsx';
 
 export function SkillProfile() {
-  // Get real user object from AuthContext
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, mode, setMode, updateCapabilities, updateLocalUser } = useAuth();
 
   // Profile data states
   const [bio, setBio] = useState('');
+  const [username, setUsername] = useState('');
+  const [specialization, setSpecialization] = useState('');
+  const [canTeachState, setCanTeachState] = useState(true);
+  const [canLearnState, setCanLearnState] = useState(true);
   const [teachSkills, setTeachSkills] = useState([]);
   const [learnSkills, setLearnSkills] = useState([]);
 
-  // Inputs for adding a new teachable skill
+  // Inputs for adding skills
   const [newTeachSkillName, setNewTeachSkillName] = useState('');
   const [newTeachLevel, setNewTeachLevel] = useState('intermediate');
-
-  // Input for adding a new learning skill
   const [newLearnSkillName, setNewLearnSkillName] = useState('');
 
   // UI status states
@@ -44,7 +49,6 @@ export function SkillProfile() {
   const [isSaving, setIsSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState(null);
   const [successMessage, setSuccessMessage] = useState(null);
-  const [isDemo, setIsDemo] = useState(false);
 
   // Skill Verification Quiz states
   const [selectedQuizSkill, setSelectedQuizSkill] = useState(null);
@@ -56,31 +60,23 @@ export function SkillProfile() {
   const [quizResult, setQuizResult] = useState(null);
   const [quizError, setQuizError] = useState(null);
 
-  /**
-   * Loads the current user's profile details on component mount.
-   */
   useEffect(() => {
     async function loadProfile() {
-      // Use real user ID if logged in, otherwise default demo ID
       const activeUserId = user ? user.id : 'usr_002';
-
       setIsLoading(true);
       setErrorMessage(null);
 
       try {
         const response = await getUserProfile(activeUserId);
+        setBio(response.bio || response.profile_summary || '');
+        setUsername(response.username || '');
+        setSpecialization(response.specialization_domain || '');
+        setCanTeachState(response.can_teach !== false);
+        setCanLearnState(response.can_learn !== false);
 
-        // Populate bio
-        setBio(response.bio || '');
-
-        // Split loaded skills into 'teach' and 'learn' categories
         const loadedSkills = response.skills || [];
-        setTeachSkills(loadedSkills.filter(s => s.type === 'teach'));
-        setLearnSkills(loadedSkills.filter(s => s.type === 'learn'));
-
-        if (response.isMock) {
-          setIsDemo(true);
-        }
+        setTeachSkills(loadedSkills.filter((s) => s.type === 'teach'));
+        setLearnSkills(loadedSkills.filter((s) => s.type === 'learn'));
       } catch (error) {
         setErrorMessage(error.message || 'Failed to load user profile.');
       } finally {
@@ -92,8 +88,7 @@ export function SkillProfile() {
   }, [user]);
 
   /**
-   * Starts the 10-question teacher verification quiz for the given teachable skill.
-   * If a curated question bank is not available, displays an explanatory message.
+   * Starts teacher verification quiz for a teachable skill.
    */
   async function handleSelectTeachableSkill(skillName) {
     if (!skillName || typeof skillName !== 'string') return;
@@ -125,7 +120,7 @@ export function SkillProfile() {
   }
 
   /**
-   * Submits answers to the backend for server-side grading.
+   * Submits answers to backend for grading.
    */
   async function handleSubmitQuiz(event) {
     if (event) event.preventDefault();
@@ -143,7 +138,7 @@ export function SkillProfile() {
 
       setQuizResult(response);
 
-      // If user passed (score >= 5/10), immediately update the skill in state to display the verified badge
+      // If user passed, update local state
       if (response.passed) {
         setTeachSkills((prev) =>
           prev.map((s) =>
@@ -160,87 +155,59 @@ export function SkillProfile() {
     }
   }
 
-  /**
-   * Adds a new skill to the "Skills I Can Teach" list and automatically launches verification quiz.
-   */
   function handleAddTeachSkill(event) {
     event.preventDefault();
-    const trimmed = newTeachSkillName.trim();
-    if (!trimmed) return;
+    const cleanName = newTeachSkillName.trim();
+    if (!cleanName) return;
 
-    // Prevent duplicates
-    const alreadyExists = teachSkills.some(
-      s => s.skill_name.toLowerCase() === trimmed.toLowerCase()
-    );
-
-    if (alreadyExists) {
-      setErrorMessage(`"${trimmed}" is already in your teaching list.`);
+    if (teachSkills.some((s) => s.skill_name.toLowerCase() === cleanName.toLowerCase())) {
+      setErrorMessage(`You have already listed "${cleanName}" as a teachable skill.`);
       return;
     }
 
-    const newSkillItem = {
-      id: 'teach_' + Date.now(),
-      skill_name: trimmed,
+    const newSkill = {
+      id: `temp_${Date.now()}`,
+      skill_name: cleanName,
       level: newTeachLevel,
       type: 'teach',
       is_verified: false,
     };
 
-    setTeachSkills(prev => [...prev, newSkillItem]);
+    setTeachSkills([...teachSkills, newSkill]);
     setNewTeachSkillName('');
-    setErrorMessage(null);
-
-    // Automatically start quiz for the newly selected teachable skill
-    handleSelectTeachableSkill(trimmed);
+    setSuccessMessage(`Added "${cleanName}". Click "Save Profile Changes" below to commit to database.`);
   }
 
-  /**
-   * Removes a skill from the "Skills I Can Teach" list.
-   */
-  function handleRemoveTeachSkill(skillIdToRemove) {
-    setTeachSkills(prev => prev.filter(s => s.id !== skillIdToRemove));
+  function handleRemoveTeachSkill(skillId) {
+    setTeachSkills(teachSkills.filter((s) => s.id !== skillId));
   }
 
-  /**
-   * Adds a new skill to the "Skills I Want to Learn" list.
-   */
   function handleAddLearnSkill(event) {
     event.preventDefault();
-    const trimmed = newLearnSkillName.trim();
-    if (!trimmed) return;
+    const cleanName = newLearnSkillName.trim();
+    if (!cleanName) return;
 
-    // Prevent duplicates
-    const alreadyExists = learnSkills.some(
-      s => s.skill_name.toLowerCase() === trimmed.toLowerCase()
-    );
-
-    if (alreadyExists) {
-      setErrorMessage(`"${trimmed}" is already in your learning list.`);
+    if (learnSkills.some((s) => s.skill_name.toLowerCase() === cleanName.toLowerCase())) {
+      setErrorMessage(`You have already listed "${cleanName}" in your wanted skills.`);
       return;
     }
 
-    const newSkillItem = {
-      id: 'learn_' + Date.now(),
-      skill_name: trimmed,
+    const newSkill = {
+      id: `temp_${Date.now()}`,
+      skill_name: cleanName,
       level: 'beginner',
       type: 'learn',
     };
 
-    setLearnSkills(prev => [...prev, newSkillItem]);
+    setLearnSkills([...learnSkills, newSkill]);
     setNewLearnSkillName('');
-    setErrorMessage(null);
+    setSuccessMessage(`Added "${cleanName}". Click "Save Profile Changes" below to commit to database.`);
   }
 
-  /**
-   * Removes a skill from the "Skills I Want to Learn" list.
-   */
-  function handleRemoveLearnSkill(skillIdToRemove) {
-    setLearnSkills(prev => prev.filter(s => s.id !== skillIdToRemove));
+  function handleRemoveLearnSkill(skillId) {
+    setLearnSkills(learnSkills.filter((s) => s.id !== skillId));
   }
 
-  /**
-   * Submits updated profile (skills + bio) to the backend API.
-   */
   async function handleSaveProfile(event) {
     event.preventDefault();
     setErrorMessage(null);
@@ -250,18 +217,34 @@ export function SkillProfile() {
     const activeUserId = user ? user.id : 'usr_002';
 
     try {
-      // Combine teach and learn skill arrays into a unified payload
       const combinedSkills = [...teachSkills, ...learnSkills];
 
-      const payload = {
+      // Save skills to PostgreSQL
+      await updateSkills(activeUserId, {
         bio: bio,
         skills: combinedSkills,
-      };
+      });
 
-      const response = await updateSkills(activeUserId, payload);
+      // Save user capabilities & metadata if logged in
+      if (user && user.id) {
+        await updateUserProfile(user.id, {
+          profile_summary: bio,
+          bio: bio,
+          specialization_domain: specialization,
+          can_teach: canTeachState,
+          can_learn: canLearnState,
+        });
 
-      setSuccessMessage(response.message || 'Profile skills and bio saved successfully!');
-      if (response.isMock) setIsDemo(true);
+        updateLocalUser({
+          bio: bio,
+          profile_summary: bio,
+          specialization_domain: specialization,
+          can_teach: canTeachState,
+          can_learn: canLearnState,
+        });
+      }
+
+      setSuccessMessage('Profile skills and capabilities saved successfully in PostgreSQL.');
     } catch (error) {
       setErrorMessage(error.message || 'Failed to update skills.');
     } finally {
@@ -270,45 +253,89 @@ export function SkillProfile() {
   }
 
   return (
-    <div className="page" style={{ maxWidth: '850px' }}>
-      {/* Demo Banner */}
-      <DemoBanner isDemo={isDemo} />
-
+    <div className="page" style={{ maxWidth: '920px' }}>
       {/* Page Header */}
       <div className="page-header">
-        <h1 className="page-title">👤 My Skill Profile</h1>
+        <h1 className="page-title">Profile & Skills</h1>
         <p className="page-subtitle">
-          Manage the skills you share with peers and topics you wish to learn.
+          Manage your bio, teachable skills with verification quizzes, wanted skills, and platform capabilities.
         </p>
       </div>
 
-      {/* Notice if user is not logged in */}
       {!isAuthenticated && (
-        <div className="alert alert-info" style={{ marginBottom: '1.5rem' }}>
-          <span>
-            ℹ️ You are viewing a default profile. <Link to="/login" style={{ fontWeight: '600', textDecoration: 'underline' }}>Log in</Link> to edit your personal profile.
-          </span>
+        <div className="alert alert-info">
+          <span>You are viewing default profile data. <Link to="/login" style={{ fontWeight: '600' }}>Log in</Link> to save changes to your personal account.</span>
         </div>
       )}
 
-      {/* Feedback Alerts */}
       {successMessage && <SuccessState message={successMessage} />}
       {errorMessage && <ErrorState message={errorMessage} />}
 
-      {/* Loading indicator */}
       {isLoading ? (
-        <Loader message="Loading your profile and skill set..." />
+        <Loader message="Loading your profile data..." />
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-          {/* Section 1: Bio / Summary */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.75rem' }}>
+          {/* Section 1: Mode & Capabilities */}
           <div className="card">
-            <h2 className="card-title">📝 About You / Bio</h2>
+            <h2 className="card-title">Role & Capabilities</h2>
             <p className="card-subtitle">
-              Provide a brief summary of your background, learning interests, or teaching style.
+              Configure your active interaction mode and indicate whether you teach, learn, or both.
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '1rem', backgroundColor: 'var(--color-bg-secondary)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+                <div>
+                  <div style={{ fontWeight: '600', color: 'var(--color-text-primary)' }}>
+                    Active Mode: <span style={{ color: mode === 'teacher' ? '#a78bfa' : '#60a5fa', textTransform: 'capitalize' }}>{mode}</span>
+                  </div>
+                  <div style={{ fontSize: '0.82rem', color: 'var(--color-text-muted)' }}>
+                    {mode === 'teacher' ? 'Currently viewing teaching dashboard and session requests' : 'Currently viewing learning dashboard and recommendations'}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setMode(mode === 'teacher' ? 'learner' : 'teacher')}
+                  className="btn btn-sm btn-outline"
+                  style={{ gap: '0.4rem' }}
+                >
+                  <SwitchModeIcon size={16} />
+                  <span>Switch to {mode === 'teacher' ? 'Learner' : 'Teacher'}</span>
+                </button>
+              </div>
+
+              <div style={{ display: 'flex', gap: '2rem', flexWrap: 'wrap', padding: '0.5rem 0' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', cursor: 'pointer', fontSize: '0.92rem' }}>
+                  <input
+                    type="checkbox"
+                    checked={canTeachState}
+                    onChange={(e) => setCanTeachState(e.target.checked)}
+                  />
+                  <span>I can teach and mentor peers (Teacher capability)</span>
+                </label>
+
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', cursor: 'pointer', fontSize: '0.92rem' }}>
+                  <input
+                    type="checkbox"
+                    checked={canLearnState}
+                    onChange={(e) => setCanLearnState(e.target.checked)}
+                  />
+                  <span>I want to learn new skills (Learner capability)</span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          {/* Section 2: Bio & Professional Summary */}
+          <div className="card">
+            <h2 className="card-title">Professional Summary & Bio</h2>
+            <p className="card-subtitle">
+              Brief summary of your background, learning goals, or teaching approach.
             </p>
 
             <div className="form-group">
+              <label className="form-label" htmlFor="profile-bio">About You</label>
               <textarea
+                id="profile-bio"
                 className="form-textarea"
                 rows="3"
                 value={bio}
@@ -318,23 +345,26 @@ export function SkillProfile() {
             </div>
           </div>
 
-          {/* Section 2: Skills I Can Teach */}
+          {/* Section 3: Skills I Can Teach & Verification Quizzes */}
           <div className="card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
               <h2 className="card-title" style={{ margin: 0 }}>
-                🎓 Skills I Can Teach
+                Skills I Can Teach
               </h2>
               <span className="badge badge-volunteer">Mentoring</span>
             </div>
             <p className="card-subtitle">
-              Add topics you are confident explaining to peers. Specify your proficiency level.
+              Add topics you are confident explaining. Click any teachable skill to start its 10-question verification quiz.
             </p>
 
-            {/* List of currently added teaching skills */}
-            <div className="chip-container" style={{ marginBottom: '1.25rem', minHeight: '38px' }}>
+            {/* Teachable skills chip list */}
+            <div className="chip-container" style={{ marginBottom: '1.25rem', minHeight: '40px' }}>
               {teachSkills.length > 0 ? (
                 teachSkills.map((skill) => {
                   const isSelected = selectedQuizSkill && selectedQuizSkill.toLowerCase() === skill.skill_name.toLowerCase();
+                  // STRICT: Only show badge when API says is_verified === true
+                  const isVerified = Boolean(skill.is_verified);
+
                   return (
                     <span
                       key={skill.id}
@@ -342,42 +372,28 @@ export function SkillProfile() {
                       style={{
                         cursor: 'pointer',
                         borderColor: isSelected ? 'var(--color-primary)' : 'var(--color-border)',
-                        backgroundColor: isSelected ? '#eff6ff' : 'var(--color-surface)',
+                        backgroundColor: isSelected ? 'rgba(79, 70, 229, 0.2)' : 'var(--color-bg-secondary)',
                       }}
                       onClick={() => handleSelectTeachableSkill(skill.skill_name)}
-                      title={`Click to start or review teacher verification quiz for ${skill.skill_name}`}
+                      title={`Click to start or review verification quiz for ${skill.skill_name}`}
                     >
                       <span style={{ fontWeight: isSelected ? '700' : '500' }}>{skill.skill_name}</span>
                       <span className="chip-level">{skill.level}</span>
-                      {skill.is_verified ? (
-                        <span
-                          className="badge"
-                          style={{
-                            backgroundColor: '#16a34a',
-                            color: '#ffffff',
-                            marginLeft: '0.35rem',
-                            fontSize: '0.72rem',
-                            padding: '0.15rem 0.4rem',
-                            fontWeight: '700',
-                          }}
-                          title="Verified Teacher"
-                        >
-                          ✓ Verified
+                      {isVerified ? (
+                        <span className="badge badge-verified" title="Verified Teacher: Qualified via skill quiz">
+                          <VerifiedBadgeIcon size={12} />
+                          <span>Verified</span>
                         </span>
                       ) : (
                         <span
                           className="badge"
                           style={{
-                            backgroundColor: '#e0f2fe',
-                            color: '#0369a1',
-                            marginLeft: '0.35rem',
+                            backgroundColor: 'rgba(59, 130, 246, 0.15)',
+                            color: '#60a5fa',
                             fontSize: '0.72rem',
-                            padding: '0.15rem 0.4rem',
-                            fontWeight: '600',
                           }}
-                          title="Click to take 10-question teacher verification quiz"
                         >
-                          🎯 Take Quiz
+                          Take Quiz
                         </span>
                       )}
                       <button
@@ -389,19 +405,19 @@ export function SkillProfile() {
                         className="chip-remove"
                         title={`Remove ${skill.skill_name}`}
                       >
-                        ✕
+                        <CloseIcon size={14} />
                       </button>
                     </span>
                   );
                 })
               ) : (
                 <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
-                  No teaching skills added yet. Add one below!
+                  No teachable skills listed yet. Add one below.
                 </span>
               )}
             </div>
 
-            {/* Form to add a new teaching skill */}
+            {/* Add Teachable Skill Form */}
             <form onSubmit={handleAddTeachSkill} style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
               <input
                 type="text"
@@ -411,7 +427,6 @@ export function SkillProfile() {
                 onChange={(e) => setNewTeachSkillName(e.target.value)}
                 placeholder="Skill name (e.g. Python, Graphs, CSS)"
               />
-
               <select
                 className="form-select"
                 style={{ flex: 1, minWidth: '140px' }}
@@ -422,59 +437,56 @@ export function SkillProfile() {
                 <option value="intermediate">Intermediate</option>
                 <option value="expert">Expert</option>
               </select>
-
-              <button type="submit" className="btn btn-secondary btn-sm">
-                ➕ Add Skill
+              <button type="submit" className="btn btn-secondary">
+                Add Skill
               </button>
             </form>
           </div>
 
-          {/* TEACHER VERIFICATION QUIZ SECTION */}
+          {/* Teacher Verification Quiz Interactive Container */}
           {isQuizLoading && (
             <div className="card" style={{ borderLeft: '4px solid var(--color-primary)' }}>
-              <Loader message={`Starting 10-question teacher verification quiz for "${selectedQuizSkill}"...`} />
+              <Loader message={`Starting 10-question verification quiz for "${selectedQuizSkill}"...`} />
             </div>
           )}
 
           {quizUnavailableMessage && !isQuizLoading && (
-            <div className="card" style={{ borderLeft: '4px solid #f59e0b', backgroundColor: '#fffbeb' }}>
+            <div className="card" style={{ borderLeft: '4px solid var(--color-warning)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                 <div>
-                  <h3 style={{ fontSize: '1.05rem', fontWeight: '700', color: '#92400e', marginBottom: '0.25rem' }}>
-                    ℹ️ Verification Quiz Not Available
+                  <h3 style={{ fontSize: '1.05rem', fontWeight: '700', color: '#fbbf24', marginBottom: '0.25rem' }}>
+                    Verification Quiz Not Available
                   </h3>
-                  <p style={{ fontSize: '0.9rem', color: '#78350f', lineHeight: 1.5 }}>
+                  <p style={{ fontSize: '0.9rem', color: 'var(--color-text-secondary)', lineHeight: 1.5 }}>
                     {quizUnavailableMessage}
                   </p>
                 </div>
                 <button
                   type="button"
                   onClick={() => setQuizUnavailableMessage(null)}
-                  className="btn btn-sm"
-                  style={{ backgroundColor: 'transparent', border: 'none', color: '#92400e', cursor: 'pointer', fontSize: '1.2rem', padding: '0 0.5rem' }}
+                  className="btn btn-sm btn-outline"
                 >
-                  ✕
+                  <CloseIcon size={16} />
                 </button>
               </div>
             </div>
           )}
 
           {quizError && !isQuizLoading && (
-            <div className="card" style={{ borderLeft: '4px solid #ef4444', backgroundColor: '#fef2f2' }}>
+            <div className="card" style={{ borderLeft: '4px solid var(--color-danger)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                 <div>
-                  <h3 style={{ fontSize: '1rem', fontWeight: '700', color: '#b91c1c', marginBottom: '0.25rem' }}>
-                    ⚠️ Quiz Notice
+                  <h3 style={{ fontSize: '1rem', fontWeight: '700', color: '#f87171', marginBottom: '0.25rem' }}>
+                    Quiz Notice
                   </h3>
-                  <p style={{ fontSize: '0.9rem', color: '#991b1b' }}>{quizError}</p>
+                  <p style={{ fontSize: '0.9rem', color: 'var(--color-text-secondary)' }}>{quizError}</p>
                 </div>
                 <button
                   type="button"
                   onClick={() => setQuizError(null)}
-                  className="btn btn-sm"
-                  style={{ backgroundColor: 'transparent', border: 'none', color: '#b91c1c', cursor: 'pointer', fontSize: '1.2rem', padding: '0 0.5rem' }}
+                  className="btn btn-sm btn-outline"
                 >
-                  ✕
+                  <CloseIcon size={16} />
                 </button>
               </div>
             </div>
@@ -482,66 +494,66 @@ export function SkillProfile() {
 
           {/* ACTIVE QUIZ QUESTIONS DISPLAY */}
           {activeQuiz && !quizResult && !isQuizLoading && (
-            <div className="card" style={{ border: '2px solid var(--color-primary)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.75rem' }}>
+            <div className="card" style={{ border: '2px solid var(--color-primary)', backgroundColor: 'var(--color-surface-elevated)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
                 <div>
-                  <h2 className="card-title" style={{ margin: 0, color: 'var(--color-primary)' }}>
-                    🎯 Teacher Verification Quiz: {activeQuiz.skillName}
+                  <h2 className="card-title" style={{ margin: 0, color: '#818cf8', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <QuizIcon size={20} />
+                    <span>Teacher Verification Quiz: {activeQuiz.skillName}</span>
                   </h2>
-                  <p className="card-subtitle" style={{ marginTop: '0.25rem', marginBottom: 0 }}>
-                    Answer 10 domain-specific questions. A score of <strong>5/10 (50%) or higher</strong> qualifies you as a verified teacher for {activeQuiz.skillName}. Questions and answer options are randomly ordered. Answer keys remain server-side.
+                  <p className="card-subtitle" style={{ marginTop: '0.35rem', marginBottom: 0 }}>
+                    Answer 10 domain-specific questions. A score of <strong>5/10 (50%) or higher</strong> qualifies you as a verified teacher. Answer keys remain server-side.
                   </p>
                 </div>
                 <button
                   type="button"
                   onClick={() => setActiveQuiz(null)}
-                  className="btn btn-secondary btn-sm"
-                  style={{ flexShrink: 0 }}
+                  className="btn btn-sm btn-outline"
                 >
                   Cancel Quiz
                 </button>
               </div>
 
-              <form onSubmit={handleSubmitQuiz} style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', marginTop: '1rem' }}>
+              <form onSubmit={handleSubmitQuiz} style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
                 {activeQuiz.questions.map((q, idx) => (
                   <div
                     key={q.id}
                     style={{
-                      padding: '1rem',
+                      padding: '1.25rem',
                       border: '1px solid var(--color-border)',
-                      borderRadius: 'var(--border-radius-sm)',
-                      backgroundColor: 'var(--color-surface)',
+                      borderRadius: 'var(--radius-md)',
+                      backgroundColor: 'var(--color-bg-secondary)',
                     }}
                   >
-                    <div style={{ fontWeight: '600', fontSize: '0.95rem', marginBottom: '0.75rem', color: 'var(--color-text-main)' }}>
+                    <div style={{ fontWeight: '600', fontSize: '0.95rem', marginBottom: '0.85rem', color: 'var(--color-text-primary)' }}>
                       Question {idx + 1} of 10: {q.question}
                     </div>
 
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                       {q.options.map((option, optIdx) => {
-                        const optionInputId = `quiz_${q.id}_opt_${optIdx}`;
+                        const isChecked = quizAnswers[q.id] === option;
                         return (
                           <label
                             key={optIdx}
-                            htmlFor={optionInputId}
                             style={{
                               display: 'flex',
                               alignItems: 'center',
-                              gap: '0.6rem',
-                              padding: '0.5rem 0.75rem',
-                              borderRadius: '4px',
+                              gap: '0.75rem',
+                              padding: '0.65rem 0.9rem',
+                              borderRadius: 'var(--radius-sm)',
                               cursor: 'pointer',
-                              border: quizAnswers[q.id] === option ? '1px solid var(--color-primary)' : '1px solid #e5e7eb',
-                              backgroundColor: quizAnswers[q.id] === option ? '#eff6ff' : '#ffffff',
+                              border: isChecked ? '1px solid var(--color-primary)' : '1px solid var(--color-border)',
+                              backgroundColor: isChecked ? 'rgba(79, 70, 229, 0.15)' : 'var(--color-surface)',
                               fontSize: '0.9rem',
+                              color: isChecked ? '#ffffff' : 'var(--color-text-secondary)',
+                              transition: 'all 0.15s ease',
                             }}
                           >
                             <input
                               type="radio"
-                              id={optionInputId}
                               name={`question_${q.id}`}
                               value={option}
-                              checked={quizAnswers[q.id] === option}
+                              checked={isChecked}
                               onChange={() => setQuizAnswers((prev) => ({ ...prev, [q.id]: option }))}
                               style={{ cursor: 'pointer' }}
                             />
@@ -553,14 +565,14 @@ export function SkillProfile() {
                   </div>
                 ))}
 
-                <div style={{ display: 'flex', gap: '1rem', marginTop: '0.5rem', alignItems: 'center' }}>
+                <div style={{ display: 'flex', gap: '1rem', marginTop: '0.5rem' }}>
                   <button
                     type="submit"
                     className="btn btn-primary btn-lg"
                     style={{ flex: 1 }}
                     disabled={isSubmittingQuiz}
                   >
-                    {isSubmittingQuiz ? 'Grading Answers on Server...' : '✓ Submit Quiz for Teacher Verification'}
+                    {isSubmittingQuiz ? 'Grading on Server...' : 'Submit Quiz for Verification'}
                   </button>
                   <button
                     type="button"
@@ -574,35 +586,36 @@ export function SkillProfile() {
             </div>
           )}
 
-          {/* QUIZ RESULT & EXPLANATIONS DISPLAY */}
+          {/* QUIZ RESULT & EXPLANATIONS */}
           {quizResult && (
             <div
               className="card"
               style={{
-                border: quizResult.passed ? '2px solid #16a34a' : '2px solid #f59e0b',
-                backgroundColor: quizResult.passed ? '#f0fdf4' : '#fffbeb',
+                border: quizResult.passed ? '2px solid var(--color-success)' : '2px solid var(--color-warning)',
+                backgroundColor: 'var(--color-surface-elevated)',
               }}
             >
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.25rem' }}>
                 <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
-                    <h2 style={{ fontSize: '1.3rem', fontWeight: '800', margin: 0, color: quizResult.passed ? '#166534' : '#92400e' }}>
-                      {quizResult.passed ? '🎉 Teacher Verification Passed!' : '📖 Verification Attempt Result'}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.35rem' }}>
+                    <h2 style={{ fontSize: '1.3rem', fontWeight: '800', margin: 0, color: quizResult.passed ? '#34d399' : '#fbbf24' }}>
+                      {quizResult.passed ? 'Teacher Verification Passed' : 'Verification Attempt Result'}
                     </h2>
                     <span
                       className="badge"
                       style={{
-                        backgroundColor: quizResult.passed ? '#16a34a' : '#d97706',
-                        color: '#ffffff',
+                        backgroundColor: quizResult.passed ? 'rgba(16, 185, 129, 0.2)' : 'rgba(245, 158, 11, 0.2)',
+                        color: quizResult.passed ? '#34d399' : '#fbbf24',
+                        border: quizResult.passed ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(245, 158, 11, 0.4)',
                         fontSize: '0.85rem',
                         fontWeight: '700',
-                        padding: '0.25rem 0.6rem',
+                        padding: '0.25rem 0.65rem',
                       }}
                     >
                       Score: {quizResult.score}/10 ({quizResult.percentage}%)
                     </span>
                   </div>
-                  <p style={{ fontSize: '0.95rem', color: quizResult.passed ? '#15803d' : '#78350f', margin: 0, lineHeight: 1.5 }}>
+                  <p style={{ fontSize: '0.95rem', color: 'var(--color-text-secondary)', margin: 0, lineHeight: 1.5 }}>
                     {quizResult.message}
                   </p>
                 </div>
@@ -614,7 +627,7 @@ export function SkillProfile() {
                       onClick={() => handleSelectTeachableSkill(quizResult.skillName)}
                       className="btn btn-primary btn-sm"
                     >
-                      🔄 Retake Quiz
+                      Retake Quiz
                     </button>
                   )}
                   <button
@@ -630,9 +643,9 @@ export function SkillProfile() {
                 </div>
               </div>
 
-              {/* Question-by-question review & explanations */}
-              <div style={{ marginTop: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                <h3 style={{ fontSize: '1rem', fontWeight: '700', color: '#1f2937', marginBottom: '0.25rem' }}>
+              {/* Question review */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
+                <h3 style={{ fontSize: '0.95rem', fontWeight: '700', color: 'var(--color-text-primary)' }}>
                   Detailed Question Review & Explanations:
                 </h3>
                 {quizResult.results && quizResult.results.map((res, idx) => (
@@ -640,47 +653,47 @@ export function SkillProfile() {
                     key={res.questionId || idx}
                     style={{
                       padding: '0.85rem 1rem',
-                      backgroundColor: '#ffffff',
-                      borderRadius: 'var(--border-radius-sm)',
-                      border: res.isCorrect ? '1px solid #bbf7d0' : '1px solid #fecaca',
+                      backgroundColor: 'var(--color-bg-secondary)',
+                      borderRadius: 'var(--radius-sm)',
+                      border: res.isCorrect ? '1px solid rgba(16, 185, 129, 0.3)' : '1px solid rgba(239, 68, 68, 0.3)',
                     }}
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.35rem' }}>
-                      <span style={{ fontWeight: '600', fontSize: '0.9rem', color: '#111827' }}>
+                      <span style={{ fontWeight: '600', fontSize: '0.9rem', color: 'var(--color-text-primary)' }}>
                         {idx + 1}. {res.question}
                       </span>
                       <span
                         style={{
                           fontSize: '0.78rem',
                           fontWeight: '700',
-                          padding: '0.15rem 0.45rem',
+                          padding: '0.15rem 0.5rem',
                           borderRadius: '4px',
-                          backgroundColor: res.isCorrect ? '#dcfce7' : '#fee2e2',
-                          color: res.isCorrect ? '#166534' : '#991b1b',
+                          backgroundColor: res.isCorrect ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                          color: res.isCorrect ? '#34d399' : '#f87171',
                           flexShrink: 0,
                           marginLeft: '0.5rem',
                         }}
                       >
-                        {res.isCorrect ? '✓ Correct' : '✕ Incorrect'}
+                        {res.isCorrect ? 'Correct' : 'Incorrect'}
                       </span>
                     </div>
 
-                    <div style={{ fontSize: '0.85rem', color: '#4b5563', marginBottom: '0.25rem' }}>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)', marginBottom: '0.25rem' }}>
                       <strong>Your answer:</strong>{' '}
-                      <span style={{ color: res.isCorrect ? '#15803d' : '#b91c1c', fontWeight: '500' }}>
+                      <span style={{ color: res.isCorrect ? '#34d399' : '#f87171' }}>
                         {res.chosenAnswer}
                       </span>
                     </div>
 
                     {!res.isCorrect && (
-                      <div style={{ fontSize: '0.85rem', color: '#15803d', marginBottom: '0.25rem' }}>
+                      <div style={{ fontSize: '0.85rem', color: '#34d399', marginBottom: '0.25rem' }}>
                         <strong>Correct answer:</strong> {res.correctAnswer}
                       </div>
                     )}
 
                     {res.explanation && (
-                      <div style={{ fontSize: '0.82rem', color: '#6b7280', fontStyle: 'italic', marginTop: '0.35rem', borderTop: '1px dashed #e5e7eb', paddingTop: '0.35rem' }}>
-                        💡 <strong>Explanation:</strong> {res.explanation}
+                      <div style={{ fontSize: '0.82rem', color: 'var(--color-text-muted)', marginTop: '0.25rem', lineHeight: 1.4 }}>
+                        {res.explanation}
                       </div>
                     )}
                   </div>
@@ -689,23 +702,17 @@ export function SkillProfile() {
             </div>
           )}
 
-          {/* Section 3: Skills I Want to Learn */}
+          {/* Section 4: Skills I Want to Learn */}
           <div className="card">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-              <h2 className="card-title" style={{ margin: 0 }}>
-                🎯 Skills I Want to Learn
-              </h2>
-              <span className="badge badge-student">Learning</span>
-            </div>
+            <h2 className="card-title">Skills I Want to Learn</h2>
             <p className="card-subtitle">
-              Our Recommendation Engine uses these goals to suggest the best mentors for you.
+              Add topics you wish to study. The recommendation engine matches you with qualified peer mentors.
             </p>
 
-            {/* List of currently added learning skills */}
-            <div className="chip-container" style={{ marginBottom: '1.25rem', minHeight: '38px' }}>
+            <div className="chip-container" style={{ marginBottom: '1.25rem', minHeight: '40px' }}>
               {learnSkills.length > 0 ? (
                 learnSkills.map((skill) => (
-                  <span key={skill.id} className="chip chip-secondary">
+                  <span key={skill.id} className="chip">
                     <span>{skill.skill_name}</span>
                     <button
                       type="button"
@@ -713,18 +720,17 @@ export function SkillProfile() {
                       className="chip-remove"
                       title={`Remove ${skill.skill_name}`}
                     >
-                      ✕
+                      <CloseIcon size={14} />
                     </button>
                   </span>
                 ))
               ) : (
                 <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
-                  No learning goals added yet. Add one below!
+                  No learning goals listed yet. Add one below.
                 </span>
               )}
             </div>
 
-            {/* Form to add a new learning skill */}
             <form onSubmit={handleAddLearnSkill} style={{ display: 'flex', gap: '0.75rem' }}>
               <input
                 type="text"
@@ -732,25 +738,23 @@ export function SkillProfile() {
                 style={{ flex: 1 }}
                 value={newLearnSkillName}
                 onChange={(e) => setNewLearnSkillName(e.target.value)}
-                placeholder="Topic you want to learn (e.g. Machine Learning, Rust, UI/UX)"
+                placeholder="Topic or skill (e.g. Machine Learning, React, UI/UX)"
               />
-
-              <button type="submit" className="btn btn-secondary btn-sm">
-                ➕ Add Goal
+              <button type="submit" className="btn btn-secondary">
+                Add Goal
               </button>
             </form>
           </div>
 
-          {/* Save Profile CTA Button */}
-          <div style={{ marginTop: '0.5rem' }}>
+          {/* Section 5: Save Profile Button */}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', marginBottom: '3rem' }}>
             <button
               type="button"
               onClick={handleSaveProfile}
               className="btn btn-primary btn-lg"
-              style={{ width: '100%' }}
               disabled={isSaving}
             >
-              {isSaving ? '💾 Saving Profile Changes...' : '💾 Save Profile & Skills'}
+              {isSaving ? 'Saving to Database...' : 'Save Profile Changes'}
             </button>
           </div>
         </div>

@@ -1155,6 +1155,9 @@ application.put("/api/users/:userId/profile", authenticateToken, async (request,
       work_experience,
       social_profiles,
       avatar_url,
+      active_mode,
+      can_teach,
+      can_learn,
     } = request.body;
 
     // Validate username if provided
@@ -1242,13 +1245,29 @@ application.put("/api/users/:userId/profile", authenticateToken, async (request,
       updateValues.push(avatar_url ? avatar_url.trim() : null);
     }
 
+    if (active_mode !== undefined) {
+      const cleanMode = active_mode === "teacher" ? "teacher" : "learner";
+      updateClauses.push(`active_mode = $${paramIndex++}`);
+      updateValues.push(cleanMode);
+    }
+
+    if (can_teach !== undefined) {
+      updateClauses.push(`can_teach = $${paramIndex++}`);
+      updateValues.push(Boolean(can_teach));
+    }
+
+    if (can_learn !== undefined) {
+      updateClauses.push(`can_learn = $${paramIndex++}`);
+      updateValues.push(Boolean(can_learn));
+    }
+
     if (updateClauses.length === 0) {
       return response.status(400).json({ error: "No valid profile fields provided for update." });
     }
 
     updateClauses.push("updated_at = CURRENT_TIMESTAMP");
 
-    const updateSql = `UPDATE users SET ${updateClauses.join(", ")} WHERE id = $${paramIndex} RETURNING id, name, email, username, role, bio, profile_summary, specialization_domain, work_experience, social_profiles, avatar_url, reputation_score, updated_at`;
+    const updateSql = `UPDATE users SET ${updateClauses.join(", ")} WHERE id = $${paramIndex} RETURNING id, name, email, username, role, bio, profile_summary, specialization_domain, work_experience, social_profiles, avatar_url, reputation_score, active_mode, can_teach, can_learn, updated_at`;
     updateValues.push(targetUserId);
 
     const updateRes = await query(updateSql, updateValues);
@@ -1276,6 +1295,9 @@ application.put("/api/users/:userId/profile", authenticateToken, async (request,
         social_profiles: updated.social_profiles || {},
         avatar_url: updated.avatar_url || null,
         reputation_score: parseFloat(updated.reputation_score) || 5.0,
+        active_mode: updated.active_mode || "learner",
+        can_teach: updated.can_teach !== false,
+        can_learn: updated.can_learn !== false,
         skills: skillsRes.rows || [],
         updated_at: updated.updated_at,
       },
@@ -1302,7 +1324,7 @@ application.get("/api/users/:userId/profile", async (request, response) => {
       const dbResult = await query(
         `SELECT u.id, u.name, u.email, u.username, u.role, u.bio, u.profile_summary,
                 u.specialization_domain, u.work_experience, u.social_profiles, u.avatar_url,
-                u.reputation_score,
+                u.reputation_score, u.active_mode, u.can_teach, u.can_learn,
                 COALESCE(
                   json_agg(
                     json_build_object('id', s.id, 'skill_name', s.skill_name, 'level', s.level, 'type', s.type, 'is_verified', COALESCE(s.is_verified, FALSE), 'verified_at', s.verified_at)
@@ -1332,6 +1354,9 @@ application.get("/api/users/:userId/profile", async (request, response) => {
           social_profiles: u.social_profiles || {},
           avatar_url: u.avatar_url || null,
           reputation_score: parseFloat(u.reputation_score) || 5.0,
+          active_mode: u.active_mode || "learner",
+          can_teach: u.can_teach !== false,
+          can_learn: u.can_learn !== false,
           skills: u.skills || [],
         });
       }
@@ -2686,7 +2711,18 @@ application.post("/api/auth/register", async (request, response) => {
       });
     }
 
-    const { name, email, password, role, username, profile_summary, specialization_domain } = request.body;
+    const {
+      name,
+      email,
+      password,
+      role,
+      username,
+      profile_summary,
+      specialization_domain,
+      active_mode,
+      can_teach,
+      can_learn,
+    } = request.body;
 
     if (!name || typeof name !== "string" || name.trim() === "") {
       return response.status(400).json({ error: "Name is required." });
@@ -2711,6 +2747,9 @@ application.post("/api/auth/register", async (request, response) => {
 
     const allowedRoles = ["student", "professional", "volunteer"];
     const userRole = allowedRoles.includes(role) ? role : "student";
+    const userMode = active_mode === "teacher" ? "teacher" : "learner";
+    const userCanTeach = can_teach !== undefined ? Boolean(can_teach) : true;
+    const userCanLearn = can_learn !== undefined ? Boolean(can_learn) : true;
 
     // Verify PostgreSQL is reachable before attempting write
     const conn = await checkConnection();
@@ -2755,9 +2794,9 @@ application.post("/api/auth/register", async (request, response) => {
 
     // Insert new user into PostgreSQL — password_hash stored, never plaintext
     await query(
-      `INSERT INTO users (id, name, email, password_hash, role, reputation_score, username, profile_summary, bio, specialization_domain)
-       VALUES ($1, $2, $3, $4, $5, 5.00, $6, $7, $7, $8)`,
-      [userId, name.trim(), email.toLowerCase().trim(), passwordHash, userRole, cleanUsername, summaryVal, specDomain]
+      `INSERT INTO users (id, name, email, password_hash, role, reputation_score, username, profile_summary, bio, specialization_domain, active_mode, can_teach, can_learn)
+       VALUES ($1, $2, $3, $4, $5, 5.00, $6, $7, $7, $8, $9, $10, $11)`,
+      [userId, name.trim(), email.toLowerCase().trim(), passwordHash, userRole, cleanUsername, summaryVal, specDomain, userMode, userCanTeach, userCanLearn]
     );
 
     // Build safe user object — password_hash is intentionally excluded
@@ -2774,6 +2813,9 @@ application.post("/api/auth/register", async (request, response) => {
       social_profiles: {},
       avatar_url: null,
       reputation_score: 5.0,
+      active_mode: userMode,
+      can_teach: userCanTeach,
+      can_learn: userCanLearn,
       skills: [],
     };
 
@@ -2785,7 +2827,7 @@ application.post("/api/auth/register", async (request, response) => {
     );
 
     return response.status(201).json({
-      message: "Registration successful! Welcome to SkillSwap.",
+      message: "Registration successful! Welcome to SkillExchange.",
       token,
       user: newUser,
     });
@@ -2839,6 +2881,7 @@ application.post("/api/auth/login", async (request, response) => {
     const result = await query(
       `SELECT u.id, u.name, u.email, u.password_hash, u.role, u.bio, u.reputation_score,
               u.username, u.profile_summary, u.specialization_domain, u.work_experience, u.social_profiles, u.avatar_url,
+              u.active_mode, u.can_teach, u.can_learn,
               COALESCE(
                 json_agg(
                   json_build_object('id', s.id, 'skill_name', s.skill_name, 'level', s.level, 'type', s.type, 'is_verified', COALESCE(s.is_verified, FALSE), 'verified_at', s.verified_at)
@@ -2883,6 +2926,9 @@ application.post("/api/auth/login", async (request, response) => {
       social_profiles: dbUser.social_profiles || {},
       avatar_url: dbUser.avatar_url || null,
       reputation_score: parseFloat(dbUser.reputation_score) || 5.0,
+      active_mode: dbUser.active_mode || "learner",
+      can_teach: dbUser.can_teach !== false,
+      can_learn: dbUser.can_learn !== false,
       skills: dbUser.skills || [],
     };
 

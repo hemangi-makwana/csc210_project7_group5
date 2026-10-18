@@ -3,29 +3,31 @@
  * Authentication Context (src/context/AuthContext.jsx)
  * ============================================================================
  * WHAT THIS FILE DOES:
- * - Manages the global login state across the entire React application.
- * - Stores the current user object and an isLoading flag using plain useState.
- * - Automatically restores the user session from localStorage when the app reloads.
- * - Provides login() and logout() functions to update both React state and localStorage.
- *
- * WHY WE USE REACT CONTEXT INSTEAD OF REDUX:
- * - React Context is built into React and requires zero extra dependencies.
- * - For a student-built app, managing user session state with Context + useState
- *   is much simpler to explain, test, and defend during a viva exam.
+ * - Manages the global login state and active Learner/Teacher mode.
+ * - Stores the user object, active_mode ('learner' | 'teacher'), and capabilities.
+ * - Restores sessions from localStorage and persists mode changes to PostgreSQL.
+ * - Provides mode toggling (Learner ⇄ Teacher) for the entire application.
  */
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { loginUser, registerUser } from '../api/auth.js';
+import { updateUserProfile } from '../api/skills.js';
 
 // Create the Context object
 const AuthContext = createContext(null);
 
 /**
- * AuthProvider wraps the application and provides authentication state to all children.
+ * AuthProvider wraps the application and provides authentication state,
+ * active learner/teacher mode, and user capabilities to all children.
  */
 export function AuthProvider({ children }) {
   // Current logged in user object, or null if logged out
   const [user, setUser] = useState(null);
+
+  // Active view/interaction mode: 'learner' or 'teacher'
+  const [mode, setModeState] = useState(() => {
+    return localStorage.getItem('skillexchange_mode') || 'learner';
+  });
 
   // Loading state while checking localStorage on initial application startup
   const [isLoading, setIsLoading] = useState(true);
@@ -41,13 +43,17 @@ export function AuthProvider({ children }) {
         const storedUserData = localStorage.getItem('user_data');
 
         if (storedToken && storedUserData) {
-          // Parse and restore the saved user object into state
           const parsedUser = JSON.parse(storedUserData);
           setUser(parsedUser);
+
+          // If user object has an active_mode from PostgreSQL, sync it
+          if (parsedUser.active_mode) {
+            setModeState(parsedUser.active_mode);
+            localStorage.setItem('skillexchange_mode', parsedUser.active_mode);
+          }
         }
       } catch (error) {
         console.error('Failed to restore session from localStorage:', error);
-        // Clear corrupted storage items
         localStorage.removeItem('token');
         localStorage.removeItem('user_data');
       } finally {
@@ -59,12 +65,72 @@ export function AuthProvider({ children }) {
   }, []);
 
   /**
+   * Sets the active mode ('learner' | 'teacher').
+   * Persists immediately to localStorage and synchronizes with PostgreSQL.
+   */
+  async function setMode(newMode) {
+    const validMode = newMode === 'teacher' ? 'teacher' : 'learner';
+    setModeState(validMode);
+    localStorage.setItem('skillexchange_mode', validMode);
+
+    if (user && user.id) {
+      const updatedUser = { ...user, active_mode: validMode };
+      setUser(updatedUser);
+      localStorage.setItem('user_data', JSON.stringify(updatedUser));
+
+      try {
+        await updateUserProfile(user.id, { active_mode: validMode });
+      } catch (err) {
+        console.warn('Could not persist mode switch to server, kept local:', err.message);
+      }
+    }
+  }
+
+  /**
+   * Toggles between 'learner' and 'teacher' modes.
+   */
+  function toggleMode() {
+    const nextMode = mode === 'teacher' ? 'learner' : 'teacher';
+    setMode(nextMode);
+  }
+
+  /**
+   * Updates user capabilities (can_teach, can_learn) and persists to PostgreSQL.
+   */
+  async function updateCapabilities({ canTeach, canLearn }) {
+    if (!user || !user.id) return;
+    const payload = {};
+    if (canTeach !== undefined) payload.can_teach = Boolean(canTeach);
+    if (canLearn !== undefined) payload.can_learn = Boolean(canLearn);
+
+    const updatedUser = {
+      ...user,
+      can_teach: payload.can_teach !== undefined ? payload.can_teach : user.can_teach,
+      can_learn: payload.can_learn !== undefined ? payload.can_learn : user.can_learn,
+    };
+    setUser(updatedUser);
+    localStorage.setItem('user_data', JSON.stringify(updatedUser));
+
+    try {
+      await updateUserProfile(user.id, payload);
+    } catch (err) {
+      console.warn('Could not persist capabilities to server:', err.message);
+    }
+  }
+
+  /**
+   * Locally updates cached user object in state and localStorage.
+   */
+  function updateLocalUser(newUserData) {
+    setUser(prev => {
+      const merged = { ...prev, ...newUserData };
+      localStorage.setItem('user_data', JSON.stringify(merged));
+      return merged;
+    });
+  }
+
+  /**
    * Logs in a user with email and password.
-   * Calls the auth API, saves token and user data to localStorage, and updates state.
-   * 
-   * @param {string} email - User email
-   * @param {string} password - User password
-   * @returns {Promise<object>} The logged-in user object
    */
   async function login(email, password) {
     setIsLoading(true);
@@ -72,11 +138,13 @@ export function AuthProvider({ children }) {
       const response = await loginUser(email, password);
 
       if (response && response.token && response.user) {
-        // Save auth token and serialized user data to browser storage
         localStorage.setItem('token', response.token);
         localStorage.setItem('user_data', JSON.stringify(response.user));
 
-        // Update React state so all components re-render with new user
+        const userMode = response.user.active_mode || 'learner';
+        setModeState(userMode);
+        localStorage.setItem('skillexchange_mode', userMode);
+
         setUser(response.user);
         return response.user;
       } else {
@@ -90,13 +158,18 @@ export function AuthProvider({ children }) {
   /**
    * Registers a user and starts their authenticated session.
    */
-  async function register(name, email, password, role) {
+  async function register(name, email, password, role, extraFields = {}) {
     setIsLoading(true);
     try {
-      const response = await registerUser({ name, email, password, role });
+      const response = await registerUser({ name, email, password, role, ...extraFields });
       if (response && response.token && response.user) {
         localStorage.setItem('token', response.token);
         localStorage.setItem('user_data', JSON.stringify(response.user));
+
+        const userMode = response.user.active_mode || 'learner';
+        setModeState(userMode);
+        localStorage.setItem('skillexchange_mode', userMode);
+
         setUser(response.user);
         return response.user;
       }
@@ -108,7 +181,6 @@ export function AuthProvider({ children }) {
 
   /**
    * Logs out the current user.
-   * Clears localStorage credentials and resets user state to null.
    */
   function logout() {
     localStorage.removeItem('token');
@@ -116,9 +188,23 @@ export function AuthProvider({ children }) {
     setUser(null);
   }
 
+  const isTeacher = mode === 'teacher';
+  const isLearner = mode === 'learner';
+  const canTeach = user ? (user.can_teach !== false) : true;
+  const canLearn = user ? (user.can_learn !== false) : true;
+
   // Value bundle shared with all consuming components
   const contextValue = {
     user: user,
+    mode: mode,
+    setMode: setMode,
+    toggleMode: toggleMode,
+    isTeacher: isTeacher,
+    isLearner: isLearner,
+    canTeach: canTeach,
+    canLearn: canLearn,
+    updateCapabilities: updateCapabilities,
+    updateLocalUser: updateLocalUser,
     login: login,
     register: register,
     logout: logout,
@@ -135,7 +221,6 @@ export function AuthProvider({ children }) {
 
 /**
  * Custom helper hook to consume the AuthContext in any component.
- * Example usage: const { user, logout } = useAuth();
  */
 export function useAuth() {
   const context = useContext(AuthContext);

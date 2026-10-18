@@ -2,116 +2,174 @@
  * ============================================================================
  * Login Page (src/pages/Login.jsx)
  * ============================================================================
- * WHAT THIS FILE DOES:
- * - Provides the login interface for users to sign into the platform.
- * - Calls the login() function provided by AuthContext (NOT api/auth.js directly).
- * - Includes 1-click quick-fill buttons for demo student/professional/volunteer accounts
- *   so the viva live demonstration can be executed quickly without typing.
+ * Redesigned with a prominent brand banner introducing SkillExchange,
+ * dark blue card aesthetics, password reveal toggle, and demo quick-fill helpers.
  */
 
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
+import { BRAND } from '../constants/brand.js';
 import { ErrorState } from '../components/Feedback.jsx';
+import { EyeIcon, EyeOffIcon } from '../components/Icons.jsx';
 
 export function Login() {
   const navigate = useNavigate();
-  // Obtain the login function from AuthContext
   const { login } = useAuth();
 
-  // Form input states
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState(null);
 
-  /**
-   * Handles form submit by invoking AuthContext's login() method.
-   */
   async function handleLoginSubmit(event) {
     event.preventDefault();
     setErrorMessage(null);
     setIsLoading(true);
 
     try {
-      // Call AuthContext login method which updates context state & localStorage
       await login(email, password);
-      // Redirect to home dashboard upon successful login
       navigate('/');
     } catch (error) {
-      setErrorMessage(error.message || 'Login failed. Please check your email and password.');
+      setErrorMessage(error.message || 'Login failed. Please check your credentials.');
     } finally {
       setIsLoading(false);
     }
   }
 
+  function handleQuickFill(demoEmail, demoPassword) {
+    setEmail(demoEmail);
+    setPassword(demoPassword);
+    setErrorMessage(null);
+  }
+
   return (
-    <div className="page" style={{ maxWidth: '480px', marginTop: '1rem' }}>
-      <div className="page-header" style={{ textAlign: 'center' }}>
-        <h1 className="page-title">🔐 Welcome Back</h1>
-        <p className="page-subtitle">Sign in to access your skills, bookings, and recommendations.</p>
-      </div>
+    <div className="auth-page-container">
+      {/* Prominent Brand Hero Banner */}
+      <section className="auth-hero-banner">
+        <span className="auth-hero-badge">Peer-to-Peer Learning Platform</span>
+        <h1 className="auth-hero-title">
+          Learn and boost your skillset with{' '}
+          <span className="auth-hero-brand">{BRAND.name}</span>
+        </h1>
+        <p className="auth-hero-desc">
+          {BRAND.description}
+        </p>
+      </section>
 
-      {errorMessage && <ErrorState message={errorMessage} />}
-
-      <div className="card">
-        <form onSubmit={handleLoginSubmit} className="form">
-          {/* Email Field */}
-          <div className="form-group">
-            <label className="form-label" htmlFor="login-email">
-              Email Address:
-            </label>
-            <input
-              id="login-email"
-              type="email"
-              className="form-input"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="e.g. sarah.lin@example.com"
-              required
-            />
+      {/* Login Card Form */}
+      <div className="auth-card-wrapper">
+        <div className="auth-card">
+          <div style={{ textAlign: 'center', marginBottom: '1.5rem' }}>
+            <h2 className="auth-card-title">Welcome Back</h2>
+            <p className="auth-card-sub">Sign in to your account to continue to your dashboard</p>
           </div>
 
-          {/* Password Field */}
-          <div className="form-group">
-            <label className="form-label" htmlFor="login-password">
-              Password:
-            </label>
-            <input
-              id="login-password"
-              type="password"
-              className="form-input"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Enter your password"
-              required
-            />
+          {errorMessage && <ErrorState message={errorMessage} />}
+
+          <form onSubmit={handleLoginSubmit}>
+            <div className="form-group">
+              <label className="form-label" htmlFor="login-email">
+                Email Address
+              </label>
+              <input
+                id="login-email"
+                type="email"
+                className="form-input"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="name@example.com"
+                required
+                autoComplete="email"
+              />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label" htmlFor="login-password">
+                Password
+              </label>
+              <div className="input-with-action">
+                <input
+                  id="login-password"
+                  type={showPassword ? 'text' : 'password'}
+                  className="form-input"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Enter your password"
+                  required
+                  autoComplete="current-password"
+                />
+                <button
+                  type="button"
+                  className="input-action-btn"
+                  onClick={() => setShowPassword(!showPassword)}
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  tabIndex={-1}
+                >
+                  {showPassword ? <EyeOffIcon size={18} /> : <EyeIcon size={18} />}
+                </button>
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              className="btn btn-primary btn-lg"
+              style={{ width: '100%', marginTop: '0.75rem' }}
+              disabled={isLoading}
+            >
+              {isLoading ? 'Signing In...' : 'Sign In'}
+            </button>
+          </form>
+
+          {/* Quick-fill helpers for evaluation / testing */}
+          <div style={{
+            marginTop: '1.75rem',
+            paddingTop: '1.25rem',
+            borderTop: '1px solid var(--color-border)',
+            fontSize: '0.82rem',
+            color: 'var(--color-text-muted)'
+          }}>
+            <div style={{ fontWeight: '600', marginBottom: '0.5rem', textTransform: 'uppercase', fontSize: '0.75rem', letterSpacing: '0.05em' }}>
+              Quick Fill Demo Accounts:
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="btn btn-sm btn-secondary"
+                onClick={() => handleQuickFill('sarah.lin@example.com', 'password123')}
+              >
+                Teacher (Sarah Lin)
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-secondary"
+                onClick={() => handleQuickFill('alex.rivera@example.com', 'password123')}
+              >
+                Learner (Alex Rivera)
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-secondary"
+                onClick={() => handleQuickFill('maya.chen@example.com', 'password123')}
+              >
+                Volunteer (Maya Chen)
+              </button>
+            </div>
           </div>
 
-          {/* Submit Button */}
-          <button
-            type="submit"
-            className="btn btn-primary btn-lg"
-            style={{ width: '100%', marginTop: '0.5rem' }}
-            disabled={isLoading}
-          >
-            {isLoading ? 'Signing In...' : 'Sign In'}
-          </button>
-        </form>
-
-        {/* Register link */}
-        <div style={{
-          marginTop: '1.5rem',
-          paddingTop: '1.25rem',
-          borderTop: '1px dashed var(--color-border)',
-          textAlign: 'center'
-        }}>
-          <p style={{ fontSize: '0.875rem', color: 'var(--color-text-muted)' }}>
-            Don&apos;t have an account?{' '}
-            <Link to="/register" style={{ color: 'var(--color-primary)', fontWeight: '600' }}>
-              Create one here
+          {/* Register switch link */}
+          <div style={{
+            marginTop: '1.5rem',
+            textAlign: 'center',
+            fontSize: '0.9rem',
+            color: 'var(--color-text-muted)'
+          }}>
+            Don&apos;t have an account yet?{' '}
+            <Link to="/register" style={{ fontWeight: '600', color: 'var(--color-accent)' }}>
+              Create an account
             </Link>
-          </p>
+          </div>
         </div>
       </div>
     </div>

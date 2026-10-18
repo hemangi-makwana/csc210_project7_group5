@@ -2,15 +2,8 @@
  * ============================================================================
  * Session Booking Page (src/pages/SessionBooking.jsx)
  * ============================================================================
- * WHAT THIS FILE DOES:
- * - Provides a scheduling form to book a 1:1 mentorship session.
- * - Pre-selects a mentor if navigated from a ProfileCard's "Book Session" button.
- * - Replaces any hardcoded placeholder with the real user.id from AuthContext.
- * - Calls the bookSession API to enqueue the booking request.
- *
- * BACKEND DSA CONNECTION:
- * - Calls POST /api/sessions/book, which places the booking into the backend's
- *   FIFO Queue pipeline to resolve scheduling requests chronologically.
+ * Scheduling form to book 1:1 mentorship sessions.
+ * Free of emojis; styled with dark blue surfaces.
  */
 
 import React, { useState, useEffect } from 'react';
@@ -18,18 +11,17 @@ import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { bookSession } from '../api/sessions.js';
 import { getAllMentors } from '../api/skills.js';
-import { Loader, ErrorState, SuccessState, DemoBanner } from '../components/Feedback.jsx';
+import { Loader, ErrorState, SuccessState } from '../components/Feedback.jsx';
+import { CalendarIcon, UserIcon, CheckIcon } from '../components/Icons.jsx';
 
 export function SessionBooking() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { user, isAuthenticated } = useAuth();
 
-  // Read URL query params if user clicked "Book Session" from a profile card
   const preselectedMentorId = searchParams.get('mentorId') || '';
   const preselectedMentorName = searchParams.get('mentorName') || '';
 
-  // Form input states
   const [mentorId, setMentorId] = useState(preselectedMentorId);
   const [availableMentors, setAvailableMentors] = useState([]);
   const [scheduledDate, setScheduledDate] = useState('');
@@ -37,24 +29,11 @@ export function SessionBooking() {
   const [sessionTopic, setSessionTopic] = useState('');
   const [sessionNotes, setSessionNotes] = useState('');
 
-  // UI feedback states
   const [isLoading, setIsLoading] = useState(false);
   const [isFetchingMentors, setIsFetchingMentors] = useState(false);
   const [errorMessage, setErrorMessage] = useState(null);
   const [successMessage, setSuccessMessage] = useState(null);
-  const [isDemo, setIsDemo] = useState(false);
 
-  /**
-   * Fetches available mentors for the dropdown selector on initial render.
-   *
-   * WHY WE USE A SEPARATE "GET ALL" ENDPOINT (VIVA DEFENSE POINT):
-   * In RESTful API architecture, searching for a specific skill keyword (/api/skills/search?query=...)
-   * is fundamentally different from fetching the full community mentor directory (/api/users/all).
-   * Relying on an empty search query to silently return all records is an antipattern:
-   * empty parameters shouldn't secretly act as a wildcard, as that violates what "searching for
-   * a skill" means and makes system behavior unpredictable. A dedicated endpoint makes our intent
-   * explicit and maintains clean separation of concerns.
-   */
   useEffect(() => {
     async function loadMentors() {
       setIsFetchingMentors(true);
@@ -62,7 +41,6 @@ export function SessionBooking() {
         const response = await getAllMentors();
         const results = response.mentors || response.users || response.results || [];
         setAvailableMentors(results.map(r => r.user || r));
-        if (response.isMock) setIsDemo(true);
       } catch (err) {
         console.error('Failed to load mentors dropdown:', err);
       } finally {
@@ -73,15 +51,11 @@ export function SessionBooking() {
     loadMentors();
   }, []);
 
-  /**
-   * Submits the booking request to the backend.
-   */
   async function handleBookingSubmit(event) {
     event.preventDefault();
     setErrorMessage(null);
     setSuccessMessage(null);
 
-    // Validation checks
     if (!mentorId) {
       setErrorMessage('Please select a mentor.');
       return;
@@ -91,18 +65,12 @@ export function SessionBooking() {
       return;
     }
 
-    // Determine the real learner user ID from AuthContext
     const learnerId = user ? user.id : 'usr_002';
-
-    // Combine date and time into an ISO timestamp
     const scheduledDateTime = new Date(`${scheduledDate}T${scheduledTime}`).toISOString();
 
     setIsLoading(true);
 
     try {
-      // NOTE: All API payloads in this project use camelCase field names.
-      // The backend (POST /api/sessions/book) destructures { mentorId, learnerId, scheduledAt }
-      // from req.body — sending snake_case (mentor_id etc.) would trigger a 400 error.
       const payload = {
         mentorId: mentorId,
         learnerId: learnerId,
@@ -112,11 +80,8 @@ export function SessionBooking() {
       };
 
       const response = await bookSession(payload);
+      setSuccessMessage(response.message || 'Session booked successfully!');
 
-      setSuccessMessage(response.message || 'Session booking enqueued successfully!');
-      if (response.isMock) setIsDemo(true);
-
-      // Reset form fields after 2 seconds
       setTimeout(() => {
         setSessionTopic('');
         setSessionNotes('');
@@ -129,45 +94,37 @@ export function SessionBooking() {
   }
 
   return (
-    <div className="page" style={{ maxWidth: '750px' }}>
-      {/* Demo Banner */}
-      <DemoBanner isDemo={isDemo} />
-
-      {/* Header */}
+    <div className="page" style={{ maxWidth: '780px' }}>
       <div className="page-header">
-        <h1 className="page-title">📅 Schedule a Mentoring Session</h1>
+        <h1 className="page-title">Schedule a Mentoring Session</h1>
         <p className="page-subtitle">
-          Request a 1:1 learning session with a community peer or professional mentor.
+          Arrange a 1:1 learning session with a peer or professional mentor in your community.
         </p>
       </div>
 
-      {/* DSA Explanation Note */}
       <div style={{
-        backgroundColor: 'var(--color-success-light)',
-        border: '1px solid #a7f3d0',
-        borderRadius: 'var(--border-radius-sm)',
-        padding: '0.75rem 1rem',
-        fontSize: '0.85rem',
-        color: '#065f46',
-        marginBottom: '1.5rem'
+        backgroundColor: 'rgba(79, 70, 229, 0.1)',
+        border: '1px solid rgba(79, 70, 229, 0.25)',
+        borderRadius: 'var(--radius-md)',
+        padding: '0.85rem 1.25rem',
+        fontSize: '0.88rem',
+        color: '#c7d2fe',
+        marginBottom: '2rem',
       }}>
-        ⚡ <strong>DSA in Action:</strong> Booking requests are enqueued in a backend <strong>FIFO Queue</strong>. This processes concurrent scheduling requests in order of arrival, preventing double-booking race conditions.
+        <strong>Chronological Processing:</strong> Booking requests are scheduled in chronological order, ensuring fair queue resolution without double-booking collisions.
       </div>
 
-      {/* Feedback Alerts */}
       {successMessage && <SuccessState message={successMessage} />}
       {errorMessage && <ErrorState message={errorMessage} />}
 
-      {/* Booking Form Card */}
       <div className="card">
-        <form onSubmit={handleBookingSubmit} className="form">
-          {/* Mentor Selector */}
+        <form onSubmit={handleBookingSubmit}>
           <div className="form-group">
             <label className="form-label" htmlFor="mentor-select">
-              Select Mentor:
+              Select Mentor
             </label>
             {isFetchingMentors ? (
-              <p style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)' }}>Loading mentor list...</p>
+              <p style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)' }}>Loading mentor directory...</p>
             ) : (
               <select
                 id="mentor-select"
@@ -177,26 +134,24 @@ export function SessionBooking() {
                 required
               >
                 <option value="">-- Choose a Mentor --</option>
-                {/* Include preselected mentor if not yet in loaded list */}
                 {preselectedMentorId && preselectedMentorName && !availableMentors.some(m => m.id === preselectedMentorId) && (
                   <option value={preselectedMentorId}>{preselectedMentorName}</option>
                 )}
                 {availableMentors.map((mentor) => (
                   <option key={mentor.id} value={mentor.id}>
-                    {mentor.name} ({mentor.role}) — {mentor.skills?.filter(s => s.type === 'teach').map(s => s.skill_name).join(', ')}
+                    {mentor.name} ({mentor.role}) — {mentor.skills?.filter(s => s.type === 'teach').map(s => s.skill_name).join(', ') || 'General Mentorship'}
                   </option>
                 ))}
               </select>
             )}
-            <span className="form-helper">
-              Don't see who you're looking for? <Link to="/search">Search mentors by skill keyword</Link>.
-            </span>
+            <small style={{ color: 'var(--color-text-muted)', marginTop: '0.35rem' }}>
+              Want to see detailed profiles? <Link to="/search">Find mentors by skill</Link>.
+            </small>
           </div>
 
-          {/* Session Topic */}
           <div className="form-group">
             <label className="form-label" htmlFor="session-topic">
-              Session Topic / Skill Focus:
+              Session Topic / Skill Focus
             </label>
             <input
               id="session-topic"
@@ -209,11 +164,10 @@ export function SessionBooking() {
             />
           </div>
 
-          {/* Date & Time Pickers */}
-          <div className="grid grid-cols-2" style={{ gap: '1rem' }}>
-            <div className="form-group">
+          <div className="grid grid-cols-2" style={{ gap: '1rem', marginBottom: '1.25rem' }}>
+            <div className="form-group" style={{ marginBottom: 0 }}>
               <label className="form-label" htmlFor="session-date">
-                Date:
+                Session Date
               </label>
               <input
                 id="session-date"
@@ -225,9 +179,9 @@ export function SessionBooking() {
               />
             </div>
 
-            <div className="form-group">
+            <div className="form-group" style={{ marginBottom: 0 }}>
               <label className="form-label" htmlFor="session-time">
-                Time:
+                Session Time
               </label>
               <input
                 id="session-time"
@@ -240,29 +194,35 @@ export function SessionBooking() {
             </div>
           </div>
 
-          {/* Notes & Questions */}
           <div className="form-group">
             <label className="form-label" htmlFor="session-notes">
-              Notes & Specific Questions for Mentor:
+              Preparation Notes (Optional)
             </label>
             <textarea
               id="session-notes"
               className="form-textarea"
+              rows="3"
               value={sessionNotes}
               onChange={(e) => setSessionNotes(e.target.value)}
-              placeholder="Share what you hope to achieve, any prior knowledge, or specific code problems..."
+              placeholder="Share what you hope to accomplish, questions you have, or links to relevant repos..."
             />
           </div>
 
-          {/* Submit Button */}
-          <div style={{ marginTop: '1rem' }}>
+          <div style={{ display: 'flex', gap: '1rem', marginTop: '1.5rem' }}>
             <button
               type="submit"
               className="btn btn-primary btn-lg"
-              style={{ width: '100%' }}
+              style={{ flex: 1 }}
               disabled={isLoading}
             >
-              {isLoading ? 'Enqueuing Booking...' : '📨 Enqueue Booking Request'}
+              {isLoading ? 'Booking Session...' : 'Confirm Session Booking'}
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate(-1)}
+              className="btn btn-secondary btn-lg"
+            >
+              Cancel
             </button>
           </div>
         </form>
