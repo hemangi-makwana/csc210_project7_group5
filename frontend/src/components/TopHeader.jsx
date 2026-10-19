@@ -25,6 +25,33 @@ function getInitials(name) {
 export function TopHeader({ onToggleSidebar }) {
   const { user, mode, setMode, isTeacher, isLearner } = useAuth();
   const [unreadCount, setUnreadCount] = useState(0);
+  const [dbStatus, setDbStatus] = useState('checking'); // 'connected', 'disconnected', 'checking'
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function checkDbHealth() {
+      try {
+        const res = await fetch('/api/health/db');
+        if (isMounted) {
+          if (res.ok) {
+            setDbStatus('connected');
+          } else {
+            setDbStatus('disconnected');
+          }
+        }
+      } catch (e) {
+        if (isMounted) setDbStatus('disconnected');
+      }
+    }
+
+    checkDbHealth();
+    const dbInterval = setInterval(checkDbHealth, 25000);
+    return () => {
+      isMounted = false;
+      clearInterval(dbInterval);
+    };
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -88,8 +115,36 @@ export function TopHeader({ onToggleSidebar }) {
         </div>
       </div>
 
-      {/* Right: Notifications & User Profile */}
+      {/* Right: DB indicator, Notifications & User Profile */}
       <div className="top-header-right">
+        {/* Truthful Database Health Indicator */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.45rem',
+            padding: '0.25rem 0.65rem',
+            borderRadius: '9999px',
+            fontSize: '0.74rem',
+            fontWeight: '600',
+            backgroundColor: dbStatus === 'connected' ? 'rgba(16, 185, 129, 0.12)' : (dbStatus === 'disconnected' ? 'rgba(239, 68, 68, 0.12)' : 'rgba(148, 163, 184, 0.12)'),
+            color: dbStatus === 'connected' ? '#34d399' : (dbStatus === 'disconnected' ? '#f87171' : '#94a3b8'),
+            border: `1px solid ${dbStatus === 'connected' ? 'rgba(16, 185, 129, 0.25)' : (dbStatus === 'disconnected' ? 'rgba(239, 68, 68, 0.25)' : 'rgba(148, 163, 184, 0.25)')}`,
+          }}
+          title={dbStatus === 'connected' ? 'PostgreSQL local database is connected and active' : (dbStatus === 'disconnected' ? 'PostgreSQL database is currently disconnected' : 'Checking database status...')}
+        >
+          <span
+            style={{
+              width: '7px',
+              height: '7px',
+              borderRadius: '50%',
+              backgroundColor: dbStatus === 'connected' ? '#10b981' : (dbStatus === 'disconnected' ? '#ef4444' : '#94a3b8'),
+              boxShadow: dbStatus === 'connected' ? '0 0 6px #10b981' : 'none',
+            }}
+          />
+          <span>{dbStatus === 'connected' ? 'PostgreSQL Live' : (dbStatus === 'disconnected' ? 'DB Offline' : 'Checking DB')}</span>
+        </div>
+
         {/* Notifications Icon with Badge */}
         <Link
           to="/notifications"
@@ -109,7 +164,16 @@ export function TopHeader({ onToggleSidebar }) {
         {user ? (
           <Link to="/profile" className="header-user-pill" title="View and edit your profile">
             <div className="avatar-circle">
-              {getInitials(user.name)}
+              {user.avatar_url ? (
+                <img
+                  src={user.avatar_url.startsWith('http') ? user.avatar_url : user.avatar_url}
+                  alt={user.name}
+                  style={{ width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover' }}
+                  onError={(e) => { e.target.style.display = 'none'; }}
+                />
+              ) : (
+                getInitials(user.name)
+              )}
             </div>
             <span className="header-user-name">{user.name}</span>
           </Link>

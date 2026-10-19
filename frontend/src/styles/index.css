@@ -166,32 +166,38 @@ button {
 .sidebar-brand {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
   text-decoration: none;
   color: var(--color-text-primary);
+  max-width: 100%;
 }
 
-.sidebar-brand-mark {
-  width: 38px;
-  height: 38px;
-  border-radius: var(--radius-md);
-  background: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 800;
-  font-size: 1.1rem;
-  color: #ffffff;
-  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.4);
+.sidebar-brand-logo {
+  max-height: 40px;
+  width: auto;
+  max-width: 195px;
+  object-fit: contain;
+  display: block;
+  border-radius: var(--radius-sm);
+  background-color: #171135;
+  padding: 2px 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
 }
 
-.sidebar-brand-name {
-  font-size: 1.25rem;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  background: linear-gradient(135deg, #ffffff 30%, #cbd5e1 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
+.sidebar-brand:hover .sidebar-brand-logo {
+  opacity: 0.95;
+  transform: translateY(-1px);
+}
+
+.navbar-brand-logo {
+  max-height: 36px;
+  width: auto;
+  max-width: 175px;
+  object-fit: contain;
+  display: block;
+  border-radius: var(--radius-sm);
+  background-color: #171135;
+  padding: 2px 6px;
 }
 
 .sidebar-nav {
@@ -1081,20 +1087,34 @@ button {
   border: 1px solid rgba(99, 102, 241, 0.3);
 }
 
-.auth-hero-title {
-  font-size: 2.75rem;
+.auth-hero-logo-wrapper {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin-bottom: 1.25rem;
+}
+
+.auth-hero-logo {
+  max-width: 360px;
+  width: 88%;
+  height: auto;
+  max-height: 96px;
+  object-fit: contain;
+  display: block;
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  background-color: #171135;
+  padding: 6px 12px;
+}
+
+.auth-hero-tagline {
+  font-size: 2.25rem;
   font-weight: 800;
   letter-spacing: -0.03em;
   color: #ffffff;
-  line-height: 1.2;
+  line-height: 1.25;
+  margin-top: 0.75rem;
   margin-bottom: 1rem;
-}
-
-.auth-hero-brand {
-  background: linear-gradient(135deg, #60a5fa 0%, #a855f7 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  display: inline-block;
 }
 
 .auth-hero-desc {

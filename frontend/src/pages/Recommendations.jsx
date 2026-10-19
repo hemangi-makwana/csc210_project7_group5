@@ -98,20 +98,30 @@ export function Recommendations() {
 
           <div className="grid grid-cols-2" style={{ gap: '1.5rem', marginBottom: '3rem' }}>
             {recommendationList.map((rec, index) => {
+              const mentor = rec.mentor || rec;
               const mentorObj = {
-                id: rec.userId || rec.id,
-                name: rec.name,
-                role: rec.role,
-                bio: rec.bio || rec.profile_summary,
-                reputation_score: rec.reputationScore || rec.reputation_score,
-                skills: rec.skills || (rec.teaches ? rec.teaches.map(t => ({ skill_name: t, type: 'teach' })) : []),
+                id: mentor.userId || mentor.id || rec.userId || rec.id,
+                name: mentor.name || rec.name || 'Community Mentor',
+                role: mentor.role || rec.role,
+                bio: mentor.bio || mentor.profile_summary || rec.bio,
+                avatar_url: mentor.avatar_url || rec.avatar_url || null,
+                is_demo: mentor.is_demo !== undefined ? mentor.is_demo : Boolean(rec.is_demo),
+                reputation_score: mentor.reputationScore || mentor.reputation_score || rec.reputationScore || 5.0,
+                skills: mentor.skills || rec.skills || (mentor.teaches ? mentor.teaches.map(t => ({ skill_name: t, type: 'teach' })) : []),
               };
+
+              // Ensure score is strictly between 0% and 100% (never impossible values like 800%)
+              let rawScore = rec.matchScore !== undefined ? rec.matchScore : (rec.score !== undefined ? rec.score : 85);
+              if (rawScore > 0 && rawScore <= 1.0) {
+                rawScore = rawScore * 100;
+              }
+              const displayScore = Math.min(100, Math.max(0, Math.round(rawScore)));
 
               return (
                 <ProfileCard
                   key={mentorObj.id || index}
                   user={mentorObj}
-                  matchScore={rec.matchScore ? Math.round(rec.matchScore * 100) : (rec.score ? Math.round(rec.score * 10) : 85)}
+                  matchScore={displayScore}
                   matchReason={rec.matchReason || rec.reason || null}
                 />
               );

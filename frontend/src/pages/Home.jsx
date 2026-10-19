@@ -130,11 +130,11 @@ export function Home() {
   const hasSkillsAdded = allSkills.length > 0;
 
   const checklistItems = [
-    { id: 'summary', title: 'Professional Summary', desc: 'Add a short bio about your background', completed: hasBio },
-    { id: 'experience', title: 'Work Experience', desc: 'Add your past or current roles', completed: hasExperience },
-    { id: 'socials', title: 'Social Profiles', desc: 'Link GitHub, LinkedIn, or portfolio', completed: hasSocials },
-    { id: 'avatar', title: 'Profile Photo', desc: 'Upload an avatar image', completed: hasAvatar },
-    { id: 'skills', title: 'Add Skills', desc: 'List skills you teach or want to learn', completed: hasSkillsAdded },
+    { id: 'avatar', title: 'Profile Photo', desc: 'Upload an avatar image', completed: hasAvatar, to: '/profile#photo' },
+    { id: 'summary', title: 'Professional Summary', desc: 'Add a short bio about your background', completed: hasBio, to: '/profile#summary' },
+    { id: 'experience', title: 'Work Experience', desc: 'Add your past or current roles', completed: hasExperience, to: '/profile#experience' },
+    { id: 'socials', title: 'Social Profiles', desc: 'Link GitHub, LinkedIn, or portfolio', completed: hasSocials, to: '/profile#socials' },
+    { id: 'skills', title: 'Add Skills', desc: 'List skills you teach or want to learn', completed: hasSkillsAdded, to: '/profile#skills' },
   ];
 
   const completedCount = checklistItems.filter(item => item.completed).length;
@@ -163,7 +163,7 @@ export function Home() {
       <section className="stat-grid">
         {isLearner ? (
           <>
-            <Link to="/profile" className="stat-card">
+            <Link to="/profile#learning" className="stat-card">
               <div className="stat-icon-wrapper stat-icon-blue">
                 <SkillsIcon size={24} />
               </div>
@@ -223,7 +223,7 @@ export function Home() {
               <ChevronRightIcon size={18} className="stat-desc" />
             </Link>
 
-            <Link to="/history" className="stat-card">
+            <Link to="/history?view=learning" className="stat-card">
               <div className="stat-icon-wrapper stat-icon-indigo">
                 <HistoryIcon size={24} />
               </div>
@@ -240,7 +240,7 @@ export function Home() {
         ) : (
           /* Teacher Mode Stats */
           <>
-            <Link to="/profile" className="stat-card">
+            <Link to="/profile#teaching" className="stat-card">
               <div className="stat-icon-wrapper stat-icon-purple">
                 <SkillsIcon size={24} />
               </div>
@@ -252,7 +252,7 @@ export function Home() {
               <ChevronRightIcon size={18} className="stat-desc" />
             </Link>
 
-            <Link to="/profile" className="stat-card">
+            <Link to="/profile#verified" className="stat-card">
               <div className="stat-icon-wrapper stat-icon-emerald">
                 <VerifiedBadgeIcon size={24} />
               </div>
@@ -300,7 +300,7 @@ export function Home() {
               <ChevronRightIcon size={18} className="stat-desc" />
             </Link>
 
-            <Link to="/history" className="stat-card">
+            <Link to="/history?view=teaching" className="stat-card">
               <div className="stat-icon-wrapper stat-icon-indigo">
                 <SparklesIcon size={24} />
               </div>
@@ -338,7 +338,7 @@ export function Home() {
 
         <div className="checklist-items-grid">
           {checklistItems.map((item) => (
-            <Link key={item.id} to="/profile" className="checklist-item">
+            <Link key={item.id} to={item.to} className="checklist-item">
               <div className={`checklist-circle ${item.completed ? 'completed' : ''}`}>
                 {item.completed ? <CheckIcon size={14} /> : null}
               </div>

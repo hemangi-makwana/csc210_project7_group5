@@ -10,6 +10,7 @@ import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { BRAND } from '../constants/brand.js';
+import brandLogo from '../assets/logo.png';
 import { ErrorState } from '../components/Feedback.jsx';
 import { EyeIcon, EyeOffIcon } from '../components/Icons.jsx';
 
@@ -64,11 +65,15 @@ export function Register() {
     <div className="auth-page-container">
       {/* Prominent Brand Hero Banner */}
       <section className="auth-hero-banner" style={{ padding: '2.5rem 1.5rem 2rem' }}>
+        <div className="auth-hero-logo-wrapper">
+          <img
+            src={brandLogo}
+            alt="Skill Exchange"
+            className="auth-hero-logo"
+          />
+        </div>
         <span className="auth-hero-badge">Join the Community</span>
-        <h1 className="auth-hero-title" style={{ fontSize: '2.25rem' }}>
-          Start sharing and learning with{' '}
-          <span className="auth-hero-brand">{BRAND.name}</span>
-        </h1>
+        <h1 className="auth-hero-tagline">Start sharing and learning skills</h1>
         <p className="auth-hero-desc">
           {BRAND.description}
         </p>

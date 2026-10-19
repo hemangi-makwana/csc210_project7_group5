@@ -32,10 +32,14 @@
  * ============================================================================
  */
 
+const path = require("path");
+const fs = require("fs");
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const multer = require("multer");
+const emailService = require("./services/emailService");
 const HashTable = require("./dsa/hashTable");
 const Queue = require("./dsa/queue");
 const Graph = require("./dsa/graph");
@@ -76,6 +80,41 @@ application.use(cors());
 
 // Middleware 2: Automatically parse incoming JSON request bodies into JavaScript objects
 application.use(express.json());
+
+// Ensure local uploads/avatars directory exists
+const uploadsDir = path.join(__dirname, "uploads");
+const avatarsDir = path.join(uploadsDir, "avatars");
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+if (!fs.existsSync(avatarsDir)) fs.mkdirSync(avatarsDir, { recursive: true });
+
+// Static file serving for uploaded profile photos
+application.use("/uploads", express.static(uploadsDir));
+
+// Multer storage engine for avatar images
+const avatarStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, avatarsDir);
+  },
+  filename: function (req, file, cb) {
+    const ext = path.extname(file.originalname).toLowerCase() || ".png";
+    const safeExt = [".jpg", ".jpeg", ".png", ".webp"].includes(ext) ? ext : ".png";
+    const filename = `avatar_${req.user.userId}_${Date.now()}${safeExt}`;
+    cb(null, filename);
+  },
+});
+
+const avatarUpload = multer({
+  storage: avatarStorage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB maximum
+  fileFilter: function (req, file, cb) {
+    const allowedMime = ["image/jpeg", "image/png", "image/webp", "image/jpg"];
+    if (allowedMime.includes(file.mimetype.toLowerCase())) {
+      cb(null, true);
+    } else {
+      cb(new Error("Invalid file type. Only JPG, PNG, and WebP images are permitted."));
+    }
+  },
+});
 
 /**
  * Authentication Middleware: authenticateToken
@@ -176,6 +215,20 @@ async function matchSkillsAndNotifyLearners(dbClient, teacherId, teacherName, te
         );
 
         notificationsCreated.push(insertNotif.rows[0]);
+
+        // Asynchronously dispatch email notification if learner has email configured
+        dbClient.query("SELECT email, name FROM users WHERE id = $1", [learnerId])
+          .then((lRes) => {
+            if (lRes.rows && lRes.rows[0]) {
+              emailService.notifyCourseMatch({
+                learnerEmail: lRes.rows[0].email,
+                learnerName: lRes.rows[0].name,
+                skillName: cleanSkill,
+                teacherName: teacherName,
+              }).catch(() => {});
+            }
+          })
+          .catch(() => {});
       }
     }
   }
@@ -668,7 +721,7 @@ function sortMentorsByLevel(mentorsList) {
  * 3. Sorts matching mentors by proficiency level (expert first).
  * 4. Returns { mentors: [...] }.
  */
-application.get("/api/skills/search", (request, response) => {
+application.get("/api/skills/search", async (request, response) => {
   try {
     const searchSkillName = request.query.query;
 
@@ -676,14 +729,48 @@ application.get("/api/skills/search", (request, response) => {
       return response.status(200).json({ mentors: [] });
     }
 
-    // Step 1: Use Hash Table to find mentors who have this skill in O(1) average time
-    const matchingMentors = skillHashTable.lookup(searchSkillName);
+    const cleanQuery = searchSkillName.trim();
+    const conn = await checkConnection();
+
+    if (conn.reachable) {
+      const dbResult = await query(
+        `SELECT u.id, u.id as "userId", u.name, u.role, u.bio, u.reputation_score as "reputationScore",
+                u.is_demo, u.avatar_url, s.skill_name, s.level, COALESCE(s.is_verified, FALSE) as is_verified,
+                COALESCE(
+                  (SELECT array_agg(s2.skill_name) FROM skills s2 WHERE s2.user_id = u.id AND s2.type = 'teach'),
+                  ARRAY[s.skill_name]
+                ) as skills,
+                COALESCE(
+                  (SELECT json_agg(json_build_object('skill_name', s3.skill_name, 'level', s3.level, 'type', s3.type, 'is_verified', COALESCE(s3.is_verified, FALSE)))
+                   FROM skills s3 WHERE s3.user_id = u.id AND s3.type = 'teach'),
+                  '[]'::jsonb
+                ) as skill_entries
+         FROM users u
+         JOIN skills s ON u.id = s.user_id
+         WHERE s.type = 'teach' AND LOWER(s.skill_name) LIKE LOWER($1)
+         ORDER BY s.is_verified DESC,
+           CASE s.level WHEN 'expert' THEN 1 WHEN 'intermediate' THEN 2 ELSE 3 END,
+           u.reputation_score DESC`,
+        [`%${cleanQuery}%`]
+      );
+
+      if (dbResult.rows && dbResult.rows.length > 0) {
+        return response.status(200).json({
+          mentors: dbResult.rows,
+          source: "postgresql",
+        });
+      }
+    }
+
+    // Step 1: Use Hash Table fallback to find mentors who have this skill in O(1) average time
+    const matchingMentors = skillHashTable.lookup(cleanQuery);
 
     // Step 2: Sort mentors by expertise level (expert > intermediate > beginner)
     const sortedMentors = sortMentorsByLevel(matchingMentors);
 
     return response.status(200).json({
       mentors: sortedMentors,
+      source: "hash_table",
     });
   } catch (error) {
     console.error("Error during skill search:", error);
@@ -760,9 +847,28 @@ application.post("/api/sessions/book", async (request, response) => {
         "booking_received",
         "New Mentorship Booking Request",
         `New session request for "${bookingRequest.topic}" from user ${bookingRequest.learnerId}.`,
-        "/history",
+        "/history?view=teaching",
       ]
     ).catch(() => {});
+
+    // Asynchronously dispatch email notification if mentor has email configured
+    Promise.all([
+      query("SELECT email, name FROM users WHERE id = $1", [bookingRequest.mentorId]),
+      query("SELECT name FROM users WHERE id = $1", [bookingRequest.learnerId]),
+    ])
+      .then(([mRes, lRes]) => {
+        if (mRes.rows && mRes.rows[0]) {
+          emailService.notifyBookingEvent({
+            recipientEmail: mRes.rows[0].email,
+            recipientName: mRes.rows[0].name,
+            topic: bookingRequest.topic,
+            scheduledAt: bookingRequest.scheduledAt,
+            status: "queued",
+            partnerName: lRes.rows[0]?.name || "A learner",
+          }).catch(() => {});
+        }
+      })
+      .catch(() => {});
 
     // Step 3: Enqueue in FIFO Queue to maintain pipeline processing order (DSA Feature)
     bookingQueue.enqueue(bookingRequest);
@@ -797,7 +903,9 @@ application.get("/api/users/all", async (request, response) => {
 
     if (conn.reachable) {
       const dbResult = await query(`
-        SELECT u.id, u.name, u.role, u.bio, u.reputation_score,
+        SELECT u.id, u.name, u.role, u.bio, u.profile_summary, u.specialization_domain,
+               u.work_experience, u.social_profiles, u.avatar_url, COALESCE(u.is_demo, FALSE) as is_demo,
+               u.reputation_score,
                COALESCE(array_agg(s.skill_name) FILTER (WHERE s.type = 'teach' AND s.skill_name IS NOT NULL), '{}') as skills,
                COALESCE(
                  json_agg(
@@ -807,7 +915,7 @@ application.get("/api/users/all", async (request, response) => {
                ) as skill_entries
         FROM users u
         LEFT JOIN skills s ON u.id = s.user_id
-        GROUP BY u.id, u.name, u.role, u.bio, u.reputation_score
+        GROUP BY u.id, u.name, u.role, u.bio, u.profile_summary, u.specialization_domain, u.work_experience, u.social_profiles, u.avatar_url, u.is_demo, u.reputation_score
         ORDER BY u.id;
       `);
 
@@ -818,8 +926,15 @@ application.get("/api/users/all", async (request, response) => {
           name: row.name,
           role: row.role || "Peer Mentor",
           skills: row.skill_entries && row.skill_entries.length > 0 ? row.skill_entries : (row.skills || []),
-          bio: row.bio || "",
+          bio: row.bio || row.profile_summary || "",
+          profile_summary: row.profile_summary || row.bio || "",
+          specialization_domain: row.specialization_domain || null,
+          work_experience: row.work_experience || [],
+          social_profiles: row.social_profiles || {},
+          avatar_url: row.avatar_url || null,
+          is_demo: Boolean(row.is_demo),
           reputationScore: parseFloat(row.reputation_score) || 5.0,
+          reputation_score: parseFloat(row.reputation_score) || 5.0,
         }));
 
         return response.status(200).json({
@@ -1312,6 +1427,71 @@ application.put("/api/users/:userId/profile", authenticateToken, async (request,
 });
 
 /**
+ * ENDPOINT 4B: POST /api/users/:userId/avatar
+ * Uploads a profile picture (JPG, PNG, WebP up to 5MB).
+ * Saves to backend/uploads/avatars and updates avatar_url in PostgreSQL.
+ * Strictly checks user ownership via authenticateToken.
+ */
+application.post("/api/users/:userId/avatar", authenticateToken, (request, response) => {
+  const targetUserId = request.params.userId;
+  if (request.user.userId !== targetUserId) {
+    return response.status(403).json({
+      error: "Forbidden: You are not authorized to update another user's avatar.",
+    });
+  }
+
+  avatarUpload.single("avatar")(request, response, async (uploadErr) => {
+    if (uploadErr) {
+      return response.status(400).json({
+        error: uploadErr.message || "Failed to upload avatar image. Ensure it is a valid JPG, PNG, or WebP under 5MB.",
+      });
+    }
+
+    if (!request.file) {
+      return response.status(400).json({
+        error: "No image file provided in the request body. Key must be 'avatar'.",
+      });
+    }
+
+    try {
+      const conn = await checkConnection();
+      if (!conn.reachable) {
+        return response.status(503).json({
+          error: "Database unavailable. Avatar could not be saved.",
+        });
+      }
+
+      // Public relative path served by Express static middleware
+      const avatarUrl = `/uploads/avatars/${request.file.filename}`;
+
+      const updateRes = await query(
+        `UPDATE users
+         SET avatar_url = $1, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2
+         RETURNING id, name, email, username, avatar_url, updated_at`,
+        [avatarUrl, targetUserId]
+      );
+
+      if (updateRes.rows.length === 0) {
+        return response.status(404).json({ error: "User not found." });
+      }
+
+      return response.status(200).json({
+        message: "Profile photo uploaded and updated successfully.",
+        avatar_url: avatarUrl,
+        user: updateRes.rows[0],
+      });
+    } catch (err) {
+      console.error("Error saving avatar in database:", err);
+      return response.status(500).json({
+        error: "Failed to save avatar URL to database.",
+        details: err.message,
+      });
+    }
+  });
+});
+
+/**
  * ENDPOINT 4C: GET /api/users/:userId/profile
  * Retrieves a user's full profile details including skills from PostgreSQL.
  */
@@ -1466,6 +1646,7 @@ application.get("/api/users/:userId", async (request, response) => {
 application.get("/api/users/:userId/history", async (request, response) => {
   try {
     const targetUserId = request.params.userId;
+    const roleFilter = request.query.role; // 'learner', 'teacher', or undefined
     const conn = await checkConnection();
 
     if (!conn.reachable) {
@@ -1474,13 +1655,22 @@ application.get("/api/users/:userId/history", async (request, response) => {
         database: "unreachable",
         details: conn.reason || "Local PostgreSQL is not connected.",
         sessions: [],
+        learningSessions: [],
+        teachingSessions: [],
       });
+    }
+
+    let filterClause = "WHERE (sb.learner_id = $1 OR sb.mentor_id = $1)";
+    if (roleFilter === "learner") {
+      filterClause = "WHERE sb.learner_id = $1";
+    } else if (roleFilter === "teacher") {
+      filterClause = "WHERE sb.mentor_id = $1";
     }
 
     const dbResult = await query(
       `SELECT sb.id, sb.mentor_id, sb.learner_id, sb.scheduled_at, sb.status, sb.topic, sb.notes,
-              json_build_object('id', m.id, 'name', m.name, 'role', m.role) as mentor,
-              json_build_object('id', l.id, 'name', l.name, 'role', l.role) as learner,
+              json_build_object('id', m.id, 'name', m.name, 'role', m.role, 'avatar_url', m.avatar_url, 'is_demo', m.is_demo) as mentor,
+              json_build_object('id', l.id, 'name', l.name, 'role', l.role, 'avatar_url', l.avatar_url, 'is_demo', l.is_demo) as learner,
               CASE WHEN r.id IS NOT NULL THEN
                 json_build_object('id', r.id, 'rating', r.rating, 'comment', r.comment)
               ELSE NULL END as review
@@ -1488,13 +1678,19 @@ application.get("/api/users/:userId/history", async (request, response) => {
        JOIN users m ON sb.mentor_id = m.id
        JOIN users l ON sb.learner_id = l.id
        LEFT JOIN reviews r ON sb.id = r.session_id
-       WHERE sb.learner_id = $1 OR sb.mentor_id = $1
+       ${filterClause}
        ORDER BY sb.scheduled_at DESC`,
       [targetUserId]
     );
 
+    const rows = dbResult.rows || [];
+    const learningSessions = rows.filter((s) => s.learner_id === targetUserId);
+    const teachingSessions = rows.filter((s) => s.mentor_id === targetUserId);
+
     return response.status(200).json({
-      sessions: dbResult.rows || [],
+      sessions: rows,
+      learningSessions,
+      teachingSessions,
       source: "postgresql",
     });
   } catch (error) {
@@ -1617,16 +1813,16 @@ application.get("/api/recommendations/:userId", async (request, response) => {
 
       // 2. Fetch candidate mentors excluding the requesting learner
       const dbResult = await query(
-        `SELECT u.id, u.name, u.role, u.bio, u.reputation_score,
+        `SELECT u.id, u.name, u.role, u.bio, u.reputation_score, u.avatar_url, u.is_demo,
                 COALESCE(array_agg(s.skill_name) FILTER (WHERE s.type = 'teach' AND s.skill_name IS NOT NULL), '{}') as skills,
                 COALESCE(
-                  json_agg(json_build_object('skill_name', s.skill_name, 'level', s.level, 'type', s.type))
+                  json_agg(json_build_object('skill_name', s.skill_name, 'level', s.level, 'type', s.type, 'is_verified', COALESCE(s.is_verified, FALSE)))
                   FILTER (WHERE s.type = 'teach' AND s.skill_name IS NOT NULL), '[]'
                 ) as skill_entries
          FROM users u
          LEFT JOIN skills s ON u.id = s.user_id
          WHERE u.id <> $1
-         GROUP BY u.id, u.name, u.role, u.bio, u.reputation_score
+         GROUP BY u.id, u.name, u.role, u.bio, u.reputation_score, u.avatar_url, u.is_demo
          ORDER BY u.reputation_score DESC`,
         [targetUserId]
       );
@@ -1671,6 +1867,8 @@ application.get("/api/recommendations/:userId", async (request, response) => {
         networkDistance
       );
 
+      const clampedScore = Math.min(100, Math.max(0, Math.round(scoreResult.score || 85)));
+
       const candidateRecord = {
         mentor: {
           id: mentorId,
@@ -1678,10 +1876,12 @@ application.get("/api/recommendations/:userId", async (request, response) => {
           name: mentor.name,
           role: mentor.role,
           bio: mentor.bio,
-          skills: skillsList,
+          avatar_url: mentor.avatar_url || null,
+          is_demo: Boolean(mentor.is_demo),
+          skills: mentor.skill_entries && mentor.skill_entries.length > 0 ? mentor.skill_entries : skillsList,
           reputationScore: parseFloat(mentor.reputation_score || mentor.reputationScore) || 5.0,
         },
-        score: scoreResult.score,
+        score: clampedScore,
         reason: scoreResult.reason,
         networkProximity: networkDistance === Infinity ? "community" : `${networkDistance}-hop`,
         breakdown: scoreResult.breakdown,
@@ -1694,10 +1894,13 @@ application.get("/api/recommendations/:userId", async (request, response) => {
     const topMentors = recommendationHeap.extractTopK(6);
 
     const rankedRecommendations = topMentors.map((item, index) => ({
+      ...item.mentor,
       mentor: item.mentor,
       score: item.score,
+      matchScore: item.score,
       rank: index + 1,
       reason: item.reason,
+      matchReason: item.reason,
       networkProximity: item.networkProximity,
       breakdown: item.breakdown,
     }));
@@ -2199,6 +2402,331 @@ const markAllNotificationsReadHandler = async (request, response) => {
 
 application.patch("/api/notifications/read-all", authenticateToken, markAllNotificationsReadHandler);
 application.put("/api/notifications/read-all", authenticateToken, markAllNotificationsReadHandler);
+
+// ----------------------------------------------------------------------------
+// CONNECTIONS & DIRECT MESSAGING ENDPOINTS (PostgreSQL-backed)
+// ----------------------------------------------------------------------------
+
+/**
+ * ENDPOINT: GET /api/connections
+ * Retrieves confirmed peer connections and messaging contacts for the authenticated user.
+ */
+application.get("/api/connections", authenticateToken, async (request, response) => {
+  try {
+    const userId = request.user.userId;
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable." });
+    }
+
+    const res = await query(
+      `SELECT u.id, u.name, u.email, u.username, u.role, u.avatar_url, u.is_demo, u.reputation_score,
+              c.status, c.created_at as connected_since
+       FROM connections c
+       JOIN users u ON (CASE WHEN c.user_id = $1 THEN c.peer_id ELSE c.user_id END) = u.id
+       WHERE c.user_id = $1 OR c.peer_id = $1
+       ORDER BY c.created_at DESC`,
+      [userId]
+    );
+
+    return response.status(200).json({ connections: res.rows || [] });
+  } catch (error) {
+    console.error("Error fetching connections:", error);
+    return response.status(500).json({ error: "Failed to fetch connections.", details: error.message });
+  }
+});
+
+/**
+ * ENDPOINT: GET /api/conversations
+ * Retrieves all direct message threads for the authenticated user with latest message snippet and unread count.
+ */
+application.get("/api/conversations", authenticateToken, async (request, response) => {
+  try {
+    const userId = request.user.userId;
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable." });
+    }
+
+    const convRes = await query(
+      `SELECT c.id, c.user1_id, c.user2_id, c.last_message_at, c.created_at,
+              json_build_object(
+                'id', peer.id,
+                'name', peer.name,
+                'email', peer.email,
+                'username', peer.username,
+                'avatar_url', peer.avatar_url,
+                'role', peer.role,
+                'is_demo', peer.is_demo
+              ) as peer,
+              (
+                SELECT content FROM messages m
+                WHERE m.conversation_id = c.id
+                ORDER BY m.created_at DESC LIMIT 1
+              ) as last_message_content,
+              (
+                SELECT m.created_at FROM messages m
+                WHERE m.conversation_id = c.id
+                ORDER BY m.created_at DESC LIMIT 1
+              ) as last_message_time,
+              (
+                SELECT COUNT(*)::int FROM messages m
+                WHERE m.conversation_id = c.id AND m.sender_id != $1 AND m.is_read = FALSE
+              ) as unread_count
+       FROM conversations c
+       JOIN users peer ON (CASE WHEN c.user1_id = $1 THEN c.user2_id ELSE c.user1_id END) = peer.id
+       WHERE c.user1_id = $1 OR c.user2_id = $1
+       ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC`,
+      [userId]
+    );
+
+    return response.status(200).json({ conversations: convRes.rows || [] });
+  } catch (error) {
+    console.error("Error fetching conversations:", error);
+    return response.status(500).json({ error: "Failed to fetch conversations.", details: error.message });
+  }
+});
+
+/**
+ * ENDPOINT: POST /api/conversations
+ * Initiates or returns an existing conversation thread with another community member.
+ */
+application.post("/api/conversations", authenticateToken, async (request, response) => {
+  try {
+    const currentUserId = request.user.userId;
+    const recipientId = request.body.recipientId || request.body.peerId || request.body.userId;
+
+    if (!recipientId) {
+      return response.status(400).json({ error: "recipientId is required." });
+    }
+
+    if (recipientId === currentUserId) {
+      return response.status(400).json({ error: "Cannot start a conversation with yourself." });
+    }
+
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable." });
+    }
+
+    // Verify recipient exists
+    const recCheck = await query(
+      `SELECT id, name, email, username, avatar_url, role, is_demo FROM users WHERE id = $1`,
+      [recipientId]
+    );
+    if (recCheck.rows.length === 0) {
+      return response.status(404).json({ error: "Recipient user not found." });
+    }
+    const peer = recCheck.rows[0];
+
+    // Canonical order to satisfy unique constraint
+    const u1 = currentUserId < recipientId ? currentUserId : recipientId;
+    const u2 = currentUserId < recipientId ? recipientId : currentUserId;
+
+    // Check existing or insert
+    let convRes = await query(
+      `SELECT id, user1_id, user2_id, last_message_at, created_at
+       FROM conversations
+       WHERE (user1_id = $1 AND user2_id = $2) OR (user1_id = $2 AND user2_id = $1)`,
+      [u1, u2]
+    );
+
+    if (convRes.rows.length === 0) {
+      convRes = await query(
+        `INSERT INTO conversations (user1_id, user2_id, last_message_at)
+         VALUES ($1, $2, CURRENT_TIMESTAMP)
+         RETURNING id, user1_id, user2_id, last_message_at, created_at`,
+        [u1, u2]
+      );
+
+      // Record mutual connection
+      await query(
+        `INSERT INTO connections (user_id, peer_id, status)
+         VALUES ($1, $2, 'connected')
+         ON CONFLICT (user_id, peer_id) DO NOTHING`,
+        [currentUserId, recipientId]
+      );
+    }
+
+    const conv = convRes.rows[0];
+    return response.status(200).json({
+      conversation: {
+        id: conv.id,
+        user1_id: conv.user1_id,
+        user2_id: conv.user2_id,
+        last_message_at: conv.last_message_at,
+        created_at: conv.created_at,
+        peer,
+      },
+    });
+  } catch (error) {
+    console.error("Error creating conversation:", error);
+    return response.status(500).json({ error: "Failed to start conversation.", details: error.message });
+  }
+});
+
+/**
+ * ENDPOINT: GET /api/conversations/:id/messages
+ * Retrieves all messages in a conversation.
+ * Strict security: Only participants in the conversation can view messages.
+ */
+application.get("/api/conversations/:id/messages", authenticateToken, async (request, response) => {
+  try {
+    const userId = request.user.userId;
+    const convId = parseInt(request.params.id, 10);
+    if (isNaN(convId)) {
+      return response.status(400).json({ error: "Invalid conversation ID." });
+    }
+
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable." });
+    }
+
+    // Ownership check: must be a participant
+    const convCheck = await query(
+      `SELECT id, user1_id, user2_id FROM conversations WHERE id = $1`,
+      [convId]
+    );
+
+    if (convCheck.rows.length === 0) {
+      return response.status(404).json({ error: "Conversation not found." });
+    }
+
+    const conv = convCheck.rows[0];
+    if (conv.user1_id !== userId && conv.user2_id !== userId) {
+      return response.status(403).json({
+        error: "Forbidden: You are not a participant in this conversation.",
+      });
+    }
+
+    // Fetch messages
+    const msgRes = await query(
+      `SELECT m.id, m.conversation_id, m.sender_id, m.content, m.is_read, m.created_at,
+              u.name as sender_name, u.avatar_url as sender_avatar
+       FROM messages m
+       JOIN users u ON m.sender_id = u.id
+       WHERE m.conversation_id = $1
+       ORDER BY m.created_at ASC`,
+      [convId]
+    );
+
+    // Mark unread messages sent to this user as read
+    await query(
+      `UPDATE messages SET is_read = TRUE
+       WHERE conversation_id = $1 AND sender_id != $2 AND is_read = FALSE`,
+      [convId, userId]
+    );
+
+    return response.status(200).json({ messages: msgRes.rows || [] });
+  } catch (error) {
+    console.error("Error retrieving messages:", error);
+    return response.status(500).json({ error: "Failed to retrieve messages.", details: error.message });
+  }
+});
+
+/**
+ * ENDPOINT: POST /api/conversations/:id/messages
+ * Sends a message in a conversation.
+ * Strict security: Only participants can send messages.
+ * Automatically notifies recipient with an in-app notification and email.
+ */
+application.post("/api/conversations/:id/messages", authenticateToken, async (request, response) => {
+  try {
+    const userId = request.user.userId;
+    const convId = parseInt(request.params.id, 10);
+    const { content } = request.body;
+
+    if (isNaN(convId)) {
+      return response.status(400).json({ error: "Invalid conversation ID." });
+    }
+
+    if (!content || typeof content !== "string" || content.trim() === "") {
+      return response.status(400).json({ error: "Message content cannot be empty." });
+    }
+
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable." });
+    }
+
+    // Ownership check: must be a participant
+    const convCheck = await query(
+      `SELECT id, user1_id, user2_id FROM conversations WHERE id = $1`,
+      [convId]
+    );
+
+    if (convCheck.rows.length === 0) {
+      return response.status(404).json({ error: "Conversation not found." });
+    }
+
+    const conv = convCheck.rows[0];
+    if (conv.user1_id !== userId && conv.user2_id !== userId) {
+      return response.status(403).json({
+        error: "Forbidden: You are not authorized to send messages in this conversation.",
+      });
+    }
+
+    const recipientId = conv.user1_id === userId ? conv.user2_id : conv.user1_id;
+
+    // Insert message
+    const msgRes = await query(
+      `INSERT INTO messages (conversation_id, sender_id, content, is_read, created_at)
+       VALUES ($1, $2, $3, FALSE, CURRENT_TIMESTAMP)
+       RETURNING id, conversation_id, sender_id, content, is_read, created_at`,
+      [convId, userId, content.trim()]
+    );
+    const newMessage = msgRes.rows[0];
+
+    // Update conversation timestamp
+    await query(
+      `UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP WHERE id = $1`,
+      [convId]
+    );
+
+    // Fetch sender info for notification
+    const senderRes = await query(`SELECT name FROM users WHERE id = $1`, [userId]);
+    const senderName = senderRes.rows[0]?.name || "A community member";
+
+    // Create in-app notification for recipient
+    await query(
+      `INSERT INTO notifications (user_id, type, title, message, link, is_read, created_at)
+       VALUES ($1, 'message', $2, $3, $4, FALSE, CURRENT_TIMESTAMP)`,
+      [
+        recipientId,
+        `New message from ${senderName}`,
+        content.trim().length > 100 ? `${content.trim().slice(0, 97)}...` : content.trim(),
+        `/messages?conversationId=${convId}`,
+      ]
+    );
+
+    // Fetch recipient email for optional SMTP delivery
+    const recipientRes = await query(`SELECT name, email FROM users WHERE id = $1`, [recipientId]);
+    if (recipientRes.rows.length > 0) {
+      const recUser = recipientRes.rows[0];
+      emailService.sendNotificationEmail({
+        recipientEmail: recUser.email,
+        recipientName: recUser.name,
+        subject: `New Message from ${senderName} on SkillExchange`,
+        title: `You have a new message from ${senderName}`,
+        message: content.trim(),
+        actionUrl: `/messages?conversationId=${convId}`,
+        actionText: "View Conversation",
+      }).catch((e) => console.warn("Background email notification error:", e.message));
+    }
+
+    return response.status(201).json({
+      message: "Message sent successfully.",
+      data: {
+        ...newMessage,
+        sender_name: senderName,
+      },
+    });
+  } catch (error) {
+    console.error("Error sending message:", error);
+    return response.status(500).json({ error: "Failed to send message.", details: error.message });
+  }
+});
 
 // ----------------------------------------------------------------------------
 // MENTOR LISTINGS ENDPOINTS (PostgreSQL-backed)

@@ -13,6 +13,7 @@
 import React from 'react';
 import { Link, NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
+import brandLogo from '../assets/logo.png';
 
 export function Navbar() {
   const { user, logout, isAuthenticated } = useAuth();
@@ -29,10 +30,9 @@ export function Navbar() {
   return (
     <nav className="navbar">
       <div className="navbar-container">
-        {/* Brand Logo & Title */}
-        <Link to="/" className="navbar-brand">
-          <span className="navbar-brand-icon">🎓</span>
-          <span>SkillExchange</span>
+        {/* Brand Logo */}
+        <Link to="/" className="navbar-brand" aria-label="Skill Exchange Home">
+          <img src={brandLogo} alt="Skill Exchange" className="navbar-brand-logo" />
         </Link>
 
         {/* Navigation Links */}

@@ -10,6 +10,7 @@ import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { BRAND } from '../constants/brand.js';
+import brandLogo from '../assets/logo.png';
 import { ErrorState } from '../components/Feedback.jsx';
 import { EyeIcon, EyeOffIcon } from '../components/Icons.jsx';
 
@@ -48,11 +49,15 @@ export function Login() {
     <div className="auth-page-container">
       {/* Prominent Brand Hero Banner */}
       <section className="auth-hero-banner">
+        <div className="auth-hero-logo-wrapper">
+          <img
+            src={brandLogo}
+            alt="Skill Exchange"
+            className="auth-hero-logo"
+          />
+        </div>
         <span className="auth-hero-badge">Peer-to-Peer Learning Platform</span>
-        <h1 className="auth-hero-title">
-          Learn and boost your skillset with{' '}
-          <span className="auth-hero-brand">{BRAND.name}</span>
-        </h1>
+        <h1 className="auth-hero-tagline">{BRAND.tagline}</h1>
         <p className="auth-hero-desc">
           {BRAND.description}
         </p>

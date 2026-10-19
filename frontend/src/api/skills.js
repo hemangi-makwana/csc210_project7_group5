@@ -81,3 +81,28 @@ export async function updateUserProfile(userId, profileData) {
   });
 }
 
+/**
+ * Uploads a profile photo (JPG, PNG, WebP up to 5MB) for a user.
+ * @param {string} userId - User ID.
+ * @param {File} file - Image file from file input.
+ */
+export async function uploadAvatar(userId, file) {
+  const formData = new FormData();
+  formData.append('avatar', file);
+
+  const token = localStorage.getItem('token');
+  const res = await fetch(`/api/users/${userId}/avatar`, {
+    method: 'POST',
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: formData,
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || 'Failed to upload profile picture.');
+  }
+  return data;
+}
+

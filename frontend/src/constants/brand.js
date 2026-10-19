@@ -7,12 +7,12 @@
  */
 
 export const BRAND = {
-  name: 'SkillExchange',
-  shortName: 'SkillExchange',
+  name: 'Skill Exchange',
+  shortName: 'Skill Exchange',
   tagline: 'Learn and boost your skillset',
   subtagline: 'Share your skills, find learning partners, request unavailable skills, and arrange learning sessions.',
   description:
-    'SkillExchange helps people share skills, find learning partners, request unavailable skills, and arrange learning sessions.',
-  footerText: 'SkillExchange — Community Learning & Mentorship Platform',
+    'Skill Exchange helps people share skills, find learning partners, request unavailable skills, and arrange learning sessions.',
+  footerText: 'Skill Exchange — Community Learning & Mentorship Platform',
   logoMark: 'SE',
 };

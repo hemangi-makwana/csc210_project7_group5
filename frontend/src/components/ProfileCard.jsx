@@ -33,17 +33,72 @@ export function ProfileCard({ user, matchScore = null, matchReason = null }) {
   const taughtSkills = (user.skills || []).filter(s => typeof s === 'string' || s.type === 'teach');
   const wantedSkills = (user.skills || []).filter(s => typeof s !== 'string' && s.type === 'learn');
 
+  const avatarSrc = user.avatar_url
+    ? (user.avatar_url.startsWith('http') ? user.avatar_url : `http://localhost:5000${user.avatar_url}`)
+    : null;
+
   return (
     <div className="card" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/* Header: Name, Role Badge, and Star Rating */}
+      {/* Header: Avatar, Name, Role Badge, Demo Badge, and Star Rating */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.85rem' }}>
-        <div>
-          <h3 style={{ fontSize: '1.2rem', fontWeight: '700', color: 'var(--color-text-primary)' }}>
-            {user.name}
-          </h3>
-          <span className={`badge ${getRoleBadgeClass(user.role)}`} style={{ marginTop: '0.35rem' }}>
-            {user.role ? (user.role.charAt(0).toUpperCase() + user.role.slice(1)) : 'Peer Mentor'}
-          </span>
+        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+          {avatarSrc ? (
+            <img
+              src={avatarSrc}
+              alt={user.name || 'User'}
+              style={{
+                width: '46px',
+                height: '46px',
+                borderRadius: '50%',
+                objectFit: 'cover',
+                border: '2px solid var(--color-border)',
+              }}
+              onError={(e) => { e.target.style.display = 'none'; }}
+            />
+          ) : (
+            <div
+              style={{
+                width: '46px',
+                height: '46px',
+                borderRadius: '50%',
+                backgroundColor: 'rgba(99, 102, 241, 0.2)',
+                color: '#818cf8',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontWeight: '700',
+                fontSize: '1.1rem',
+                border: '1px solid rgba(99, 102, 241, 0.4)',
+              }}
+            >
+              {(user.name || 'U').charAt(0).toUpperCase()}
+            </div>
+          )}
+
+          <div>
+            <h3 style={{ fontSize: '1.15rem', fontWeight: '700', color: 'var(--color-text-primary)', margin: 0 }}>
+              {user.name}
+            </h3>
+            <div style={{ display: 'flex', gap: '0.35rem', marginTop: '0.25rem', flexWrap: 'wrap', alignItems: 'center' }}>
+              <span className={`badge ${getRoleBadgeClass(user.role)}`}>
+                {user.role ? (user.role.charAt(0).toUpperCase() + user.role.slice(1)) : 'Peer Mentor'}
+              </span>
+              {user.is_demo && (
+                <span
+                  className="badge"
+                  style={{
+                    backgroundColor: 'rgba(99, 102, 241, 0.15)',
+                    color: '#a5b4fc',
+                    border: '1px solid rgba(99, 102, 241, 0.3)',
+                    fontSize: '0.7rem',
+                  }}
+                  title="Curated database-backed demo profile"
+                >
+                  Demo Profile
+                </span>
+              )}
+            </div>
+          </div>
         </div>
 
         <div>
@@ -145,13 +200,20 @@ export function ProfileCard({ user, matchScore = null, matchReason = null }) {
       )}
 
       {/* Action Footer */}
-      <div style={{ marginTop: 'auto', paddingTop: '0.75rem', borderTop: '1px solid var(--color-border-subtle)' }}>
+      <div style={{ marginTop: 'auto', paddingTop: '0.75rem', borderTop: '1px solid var(--color-border-subtle)', display: 'flex', gap: '0.5rem' }}>
         <Link
           to={`/booking?mentorId=${encodeURIComponent(user.id || user.userId || '')}&mentorName=${encodeURIComponent(user.name || '')}`}
           className="btn btn-primary"
-          style={{ width: '100%' }}
+          style={{ flex: 1, textAlign: 'center' }}
         >
           Book Session
+        </Link>
+        <Link
+          to={`/messages?userId=${encodeURIComponent(user.id || user.userId || '')}&name=${encodeURIComponent(user.name || '')}`}
+          className="btn btn-secondary"
+          style={{ flex: 1, textAlign: 'center' }}
+        >
+          Message
         </Link>
       </div>
     </div>

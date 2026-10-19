@@ -10,6 +10,7 @@ import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { BRAND } from '../constants/brand.js';
+import brandLogo from '../assets/logo.png';
 import {
   DashboardIcon,
   SkillsIcon,
@@ -19,6 +20,7 @@ import {
   RequestIcon,
   BellIcon,
   HistoryIcon,
+  MessageIcon,
   LogoutIcon,
   SwitchModeIcon,
   CloseIcon,
@@ -52,9 +54,12 @@ export function Sidebar({ isOpen, onClose }) {
       <aside className={`sidebar ${isOpen ? 'open' : ''}`}>
         {/* Brand Header */}
         <div className="sidebar-header">
-          <NavLink to="/" className="sidebar-brand" onClick={onClose}>
-            <div className="sidebar-brand-mark">{BRAND.logoMark}</div>
-            <span className="sidebar-brand-name">{BRAND.name}</span>
+          <NavLink to="/" className="sidebar-brand" onClick={onClose} aria-label="Skill Exchange Home">
+            <img
+              src={brandLogo}
+              alt="Skill Exchange"
+              className="sidebar-brand-logo"
+            />
           </NavLink>
           {isOpen && (
             <button
@@ -135,6 +140,15 @@ export function Sidebar({ isOpen, onClose }) {
           <span className="sidebar-nav-heading">Activity & History</span>
 
           <NavLink
+            to="/messages"
+            className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
+            onClick={onClose}
+          >
+            <MessageIcon size={19} />
+            <span>Messages</span>
+          </NavLink>
+
+          <NavLink
             to="/notifications"
             className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
             onClick={onClose}
@@ -144,7 +158,7 @@ export function Sidebar({ isOpen, onClose }) {
           </NavLink>
 
           <NavLink
-            to="/history"
+            to={isTeacher ? '/history?view=teaching' : '/history?view=learning'}
             className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
             onClick={onClose}
           >

@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS users (
                    CHECK (active_mode IN ('learner', 'teacher')),
   can_teach        BOOLEAN DEFAULT TRUE,
   can_learn        BOOLEAN DEFAULT TRUE,
+  is_demo          BOOLEAN DEFAULT FALSE,
   created_at       TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   updated_at       TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -39,6 +40,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS social_profiles JSONB DEFAULT '{}'::j
 ALTER TABLE users ADD COLUMN IF NOT EXISTS active_mode VARCHAR(20) DEFAULT 'learner';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS can_teach BOOLEAN DEFAULT TRUE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS can_learn BOOLEAN DEFAULT TRUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_demo BOOLEAN DEFAULT FALSE;
 
 -- 2. TEACHING & LEARNING SKILLS
 -- Stores each skill associated with a user, categorized by proficiency
@@ -142,6 +144,38 @@ CREATE TABLE IF NOT EXISTS quiz_attempts (
   created_at   TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 9. USER CONNECTIONS / CONTACTS
+-- Models peer-to-peer relationships and network ties.
+CREATE TABLE IF NOT EXISTS connections (
+  id           SERIAL PRIMARY KEY,
+  user_id      VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  peer_id      VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status       VARCHAR(20) NOT NULL DEFAULT 'connected'
+               CHECK (status IN ('pending', 'connected', 'blocked')),
+  created_at   TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT uq_connection_pair UNIQUE (user_id, peer_id)
+);
+
+-- 10. CONVERSATIONS & CHAT MESSAGES
+-- Tracks peer-to-peer direct messaging threads with strict access controls.
+CREATE TABLE IF NOT EXISTS conversations (
+  id              SERIAL PRIMARY KEY,
+  user1_id        VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user2_id        VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  last_message_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  created_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT uq_conversation_participants UNIQUE (user1_id, user2_id)
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id              SERIAL PRIMARY KEY,
+  conversation_id INT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  sender_id       VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  content         TEXT NOT NULL,
+  is_read         BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
 -- ============================================================================
 -- PERFORMANCE INDEXES
 -- ============================================================================
@@ -159,5 +193,12 @@ CREATE INDEX IF NOT EXISTS idx_course_requests_title ON course_requests (LOWER(t
 CREATE INDEX IF NOT EXISTS idx_course_requests_requester ON course_requests (requester_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications (user_id);
 CREATE INDEX IF NOT EXISTS idx_users_username ON users (LOWER(username));
+CREATE INDEX IF NOT EXISTS idx_users_is_demo ON users (is_demo);
 CREATE INDEX IF NOT EXISTS idx_quiz_attempts_user ON quiz_attempts (user_id);
 CREATE INDEX IF NOT EXISTS idx_quiz_attempts_user_skill ON quiz_attempts (user_id, LOWER(skill_name));
+CREATE INDEX IF NOT EXISTS idx_connections_user ON connections (user_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_user1 ON conversations (user1_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_user2 ON conversations (user2_id);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages (conversation_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages (conversation_id, is_read);
+

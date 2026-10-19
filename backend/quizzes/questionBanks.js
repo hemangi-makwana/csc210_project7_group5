@@ -1723,6 +1723,10 @@ const QUESTION_BANKS = {
   ],
 };
 
+// Merge broad catalog of question banks (Sports, ML, Social Sciences, Psychology, Math)
+const { ADDITIONAL_BANKS } = require("./expandedBanks");
+Object.assign(QUESTION_BANKS, ADDITIONAL_BANKS);
+
 /**
  * Returns whether a skill has an active question bank.
  *

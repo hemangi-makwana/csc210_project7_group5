@@ -14,7 +14,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
-import { getUserProfile, updateSkills, updateUserProfile } from '../api/skills.js';
+import { getUserProfile, updateSkills, updateUserProfile, uploadAvatar } from '../api/skills.js';
 import { startVerificationQuiz, submitVerificationQuiz } from '../api/quizzes.js';
 import { Loader, ErrorState, SuccessState } from '../components/Feedback.jsx';
 import {
@@ -28,16 +28,35 @@ import {
 } from '../components/Icons.jsx';
 
 export function SkillProfile() {
-  const { user, isAuthenticated, mode, setMode, updateCapabilities, updateLocalUser } = useAuth();
+  const { user, isAuthenticated, mode, setMode, updateLocalUser } = useAuth();
 
   // Profile data states
   const [bio, setBio] = useState('');
   const [username, setUsername] = useState('');
   const [specialization, setSpecialization] = useState('');
-  const [canTeachState, setCanTeachState] = useState(true);
-  const [canLearnState, setCanLearnState] = useState(true);
   const [teachSkills, setTeachSkills] = useState([]);
   const [learnSkills, setLearnSkills] = useState([]);
+
+  // Profile photo states
+  const [avatarUrl, setAvatarUrl] = useState(null);
+  const [avatarFile, setAvatarFile] = useState(null);
+  const [avatarPreview, setAvatarPreview] = useState(null);
+  const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
+
+  // Work experience states
+  const [workExperience, setWorkExperience] = useState([]);
+  const [newExpCompany, setNewExpCompany] = useState('');
+  const [newExpRole, setNewExpRole] = useState('');
+  const [newExpDuration, setNewExpDuration] = useState('');
+  const [newExpDesc, setNewExpDesc] = useState('');
+
+  // Social profile links state
+  const [socialProfiles, setSocialProfiles] = useState({
+    github: '',
+    linkedin: '',
+    website: '',
+    twitter: '',
+  });
 
   // Inputs for adding skills
   const [newTeachSkillName, setNewTeachSkillName] = useState('');
@@ -71,8 +90,22 @@ export function SkillProfile() {
         setBio(response.bio || response.profile_summary || '');
         setUsername(response.username || '');
         setSpecialization(response.specialization_domain || '');
-        setCanTeachState(response.can_teach !== false);
-        setCanLearnState(response.can_learn !== false);
+        setAvatarUrl(response.avatar_url || null);
+
+        // Load work experience
+        const exp = response.work_experience;
+        setWorkExperience(Array.isArray(exp) ? exp : (exp ? [exp] : []));
+
+        // Load social profiles
+        const socials = response.social_profiles;
+        if (socials && typeof socials === 'object') {
+          setSocialProfiles({
+            github: socials.github || '',
+            linkedin: socials.linkedin || '',
+            website: socials.website || '',
+            twitter: socials.twitter || '',
+          });
+        }
 
         const loadedSkills = response.skills || [];
         setTeachSkills(loadedSkills.filter((s) => s.type === 'teach'));
@@ -86,6 +119,19 @@ export function SkillProfile() {
 
     loadProfile();
   }, [user]);
+
+  // Hash-based smooth scrolling to targeted profile section (from dashboard checklist)
+  useEffect(() => {
+    if (!isLoading && window.location.hash) {
+      const targetId = window.location.hash.substring(1);
+      const elem = document.getElementById(targetId);
+      if (elem) {
+        setTimeout(() => {
+          elem.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 150);
+      }
+    }
+  }, [isLoading]);
 
   /**
    * Starts teacher verification quiz for a teachable skill.
@@ -225,31 +271,114 @@ export function SkillProfile() {
         skills: combinedSkills,
       });
 
-      // Save user capabilities & metadata if logged in
+      // Save user profile metadata to PostgreSQL
       if (user && user.id) {
         await updateUserProfile(user.id, {
           profile_summary: bio,
           bio: bio,
           specialization_domain: specialization,
-          can_teach: canTeachState,
-          can_learn: canLearnState,
+          work_experience: workExperience,
+          social_profiles: socialProfiles,
         });
 
         updateLocalUser({
           bio: bio,
           profile_summary: bio,
           specialization_domain: specialization,
-          can_teach: canTeachState,
-          can_learn: canLearnState,
+          work_experience: workExperience,
+          social_profiles: socialProfiles,
         });
       }
 
-      setSuccessMessage('Profile skills and capabilities saved successfully in PostgreSQL.');
+      setSuccessMessage('Profile details, skills, experience, and social links saved successfully in PostgreSQL.');
     } catch (error) {
       setErrorMessage(error.message || 'Failed to update skills.');
     } finally {
       setIsSaving(false);
     }
+  }
+
+  function handleAvatarFileChange(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+
+    const validMimes = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
+    if (!validMimes.includes(file.type.toLowerCase())) {
+      setErrorMessage('Invalid image format. Please select a JPG, PNG, or WebP photo.');
+      return;
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      setErrorMessage('Image size exceeds 5MB. Please choose a smaller photo.');
+      return;
+    }
+
+    setErrorMessage(null);
+    setAvatarFile(file);
+    setAvatarPreview(URL.createObjectURL(file));
+  }
+
+  async function handleUploadAvatar() {
+    if (!avatarFile) {
+      setErrorMessage('Please select a photo file first.');
+      return;
+    }
+
+    const activeUserId = user ? user.id : 'usr_002';
+    setIsUploadingAvatar(true);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    try {
+      const res = await uploadAvatar(activeUserId, avatarFile);
+      setAvatarUrl(res.avatar_url);
+      setAvatarFile(null);
+      setAvatarPreview(null);
+      updateLocalUser({ avatar_url: res.avatar_url });
+      setSuccessMessage('Profile photo uploaded and saved to PostgreSQL successfully.');
+    } catch (err) {
+      setErrorMessage(err.message || 'Failed to upload photo.');
+    } finally {
+      setIsUploadingAvatar(false);
+    }
+  }
+
+  function handleAddExperience(e) {
+    e.preventDefault();
+    if (!newExpCompany.trim() || !newExpRole.trim()) {
+      setErrorMessage('Organization/Company and Role/Title are required for work experience.');
+      return;
+    }
+
+    const item = {
+      id: `exp_${Date.now()}`,
+      company: newExpCompany.trim(),
+      role: newExpRole.trim(),
+      duration: newExpDuration.trim() || 'Present',
+      description: newExpDesc.trim(),
+    };
+
+    setWorkExperience([...workExperience, item]);
+    setNewExpCompany('');
+    setNewExpRole('');
+    setNewExpDuration('');
+    setNewExpDesc('');
+    setSuccessMessage('Work experience entry added. Click "Save Profile Changes" below to commit.');
+  }
+
+  function handleRemoveExperience(index) {
+    setWorkExperience(workExperience.filter((_, i) => i !== index));
+  }
+
+  // Helper to safely format social profile links
+  function formatSocialUrl(type, raw) {
+    if (!raw) return '#';
+    const clean = raw.trim();
+    if (clean.startsWith('http://') || clean.startsWith('https://')) return clean;
+    if (type === 'github') return `https://github.com/${clean.replace(/^@/, '')}`;
+    if (type === 'linkedin') return `https://linkedin.com/in/${clean.replace(/^@/, '')}`;
+    if (type === 'twitter') return `https://twitter.com/${clean.replace(/^@/, '')}`;
+    return `https://${clean}`;
   }
 
   return (
@@ -258,7 +387,7 @@ export function SkillProfile() {
       <div className="page-header">
         <h1 className="page-title">Profile & Skills</h1>
         <p className="page-subtitle">
-          Manage your bio, teachable skills with verification quizzes, wanted skills, and platform capabilities.
+          Manage your photo, professional bio, work experience, social links, and teachable skills with verification quizzes.
         </p>
       </div>
 
@@ -275,58 +404,115 @@ export function SkillProfile() {
         <Loader message="Loading your profile data..." />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.75rem' }}>
-          {/* Section 1: Mode & Capabilities */}
-          <div className="card">
-            <h2 className="card-title">Role & Capabilities</h2>
+          {/* Section 1: Learner / Teacher Mode Switch (No redundant capability checkboxes) */}
+          <div className="card" id="mode">
+            <h2 className="card-title">Learning & Teaching Mode</h2>
             <p className="card-subtitle">
-              Configure your active interaction mode and indicate whether you teach, learn, or both.
+              Switch between Learner Mode and Teacher Mode at any time. You can use both without restriction.
             </p>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '1rem', backgroundColor: 'var(--color-bg-secondary)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
-                <div>
-                  <div style={{ fontWeight: '600', color: 'var(--color-text-primary)' }}>
-                    Active Mode: <span style={{ color: mode === 'teacher' ? '#a78bfa' : '#60a5fa', textTransform: 'capitalize' }}>{mode}</span>
-                  </div>
-                  <div style={{ fontSize: '0.82rem', color: 'var(--color-text-muted)' }}>
-                    {mode === 'teacher' ? 'Currently viewing teaching dashboard and session requests' : 'Currently viewing learning dashboard and recommendations'}
-                  </div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '1rem', backgroundColor: 'var(--color-bg-secondary)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+              <div>
+                <div style={{ fontWeight: '600', color: 'var(--color-text-primary)' }}>
+                  Active Mode: <span style={{ color: mode === 'teacher' ? '#a78bfa' : '#60a5fa', textTransform: 'capitalize' }}>{mode}</span>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setMode(mode === 'teacher' ? 'learner' : 'teacher')}
-                  className="btn btn-sm btn-outline"
-                  style={{ gap: '0.4rem' }}
-                >
-                  <SwitchModeIcon size={16} />
-                  <span>Switch to {mode === 'teacher' ? 'Learner' : 'Teacher'}</span>
-                </button>
+                <div style={{ fontSize: '0.82rem', color: 'var(--color-text-muted)' }}>
+                  {mode === 'teacher'
+                    ? 'Teacher Mode: Managing offered skills, quiz verifications, and student session requests.'
+                    : 'Learner Mode: Searching courses, discovering mentors, and tracking your learning goals.'}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMode(mode === 'teacher' ? 'learner' : 'teacher')}
+                className="btn btn-sm btn-outline"
+                style={{ gap: '0.4rem' }}
+              >
+                <SwitchModeIcon size={16} />
+                <span>Switch to {mode === 'teacher' ? 'Learner' : 'Teacher'}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Section 2: Profile Photo Upload (Local storage + PostgreSQL path) */}
+          <div className="card" id="photo">
+            <h2 className="card-title">Profile Photo</h2>
+            <p className="card-subtitle">
+              Upload a clear JPG, PNG, or WebP photo (up to 5MB). Saved directly to local storage and PostgreSQL.
+            </p>
+
+            <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+              <div style={{ position: 'relative' }}>
+                {avatarPreview ? (
+                  <img
+                    src={avatarPreview}
+                    alt="Preview"
+                    style={{ width: '84px', height: '84px', borderRadius: '50%', objectFit: 'cover', border: '3px solid var(--color-primary)' }}
+                  />
+                ) : avatarUrl ? (
+                  <img
+                    src={avatarUrl.startsWith('http') ? avatarUrl : avatarUrl}
+                    alt="Profile"
+                    style={{ width: '84px', height: '84px', borderRadius: '50%', objectFit: 'cover', border: '3px solid var(--color-border)' }}
+                    onError={(e) => { e.target.style.display = 'none'; }}
+                  />
+                ) : (
+                  <div
+                    style={{
+                      width: '84px',
+                      height: '84px',
+                      borderRadius: '50%',
+                      backgroundColor: 'rgba(99, 102, 241, 0.2)',
+                      color: '#818cf8',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontWeight: '700',
+                      fontSize: '1.8rem',
+                      border: '2px solid rgba(99, 102, 241, 0.4)',
+                    }}
+                  >
+                    {(user?.name || 'U').charAt(0).toUpperCase()}
+                  </div>
+                )}
               </div>
 
-              <div style={{ display: 'flex', gap: '2rem', flexWrap: 'wrap', padding: '0.5rem 0' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', cursor: 'pointer', fontSize: '0.92rem' }}>
-                  <input
-                    type="checkbox"
-                    checked={canTeachState}
-                    onChange={(e) => setCanTeachState(e.target.checked)}
-                  />
-                  <span>I can teach and mentor peers (Teacher capability)</span>
-                </label>
-
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', cursor: 'pointer', fontSize: '0.92rem' }}>
-                  <input
-                    type="checkbox"
-                    checked={canLearnState}
-                    onChange={(e) => setCanLearnState(e.target.checked)}
-                  />
-                  <span>I want to learn new skills (Learner capability)</span>
-                </label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem', flex: 1, minWidth: '220px' }}>
+                <input
+                  type="file"
+                  id="avatar-file-input"
+                  accept="image/jpeg,image/png,image/webp,image/jpg"
+                  onChange={handleAvatarFileChange}
+                  style={{ display: 'none' }}
+                />
+                <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                  <label
+                    htmlFor="avatar-file-input"
+                    className="btn btn-sm btn-secondary"
+                    style={{ cursor: 'pointer', margin: 0 }}
+                  >
+                    Select Photo File
+                  </label>
+                  {avatarFile && (
+                    <button
+                      type="button"
+                      onClick={handleUploadAvatar}
+                      className="btn btn-sm btn-primary"
+                      disabled={isUploadingAvatar}
+                    >
+                      {isUploadingAvatar ? 'Uploading...' : 'Save Photo'}
+                    </button>
+                  )}
+                </div>
+                <span style={{ fontSize: '0.78rem', color: 'var(--color-text-muted)' }}>
+                  {avatarFile ? `Selected: ${avatarFile.name} (${Math.round(avatarFile.size / 1024)} KB)` : 'Supported formats: JPG, PNG, WebP. Maximum size: 5MB.'}
+                </span>
               </div>
             </div>
           </div>
 
-          {/* Section 2: Bio & Professional Summary */}
-          <div className="card">
+          {/* Section 3: Professional Summary & Bio */}
+          <div className="card" id="summary">
             <h2 className="card-title">Professional Summary & Bio</h2>
             <p className="card-subtitle">
               Brief summary of your background, learning goals, or teaching approach.
@@ -343,13 +529,238 @@ export function SkillProfile() {
                 placeholder="e.g. Senior CS student experienced in Python algorithms, eager to learn React frontends..."
               />
             </div>
+
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label className="form-label" htmlFor="specialization-domain">Domain Specialization</label>
+              <input
+                id="specialization-domain"
+                type="text"
+                className="form-input"
+                value={specialization}
+                onChange={(e) => setSpecialization(e.target.value)}
+                placeholder="e.g. Computer Science, Machine Learning, Mathematics, Sports, Photography"
+              />
+            </div>
           </div>
 
-          {/* Section 3: Skills I Can Teach & Verification Quizzes */}
-          <div className="card">
+          {/* Section 4: Work Experience Manager */}
+          <div className="card" id="experience">
+            <h2 className="card-title">Work & Educational Experience</h2>
+            <p className="card-subtitle">
+              Highlight your industry experience, teaching roles, or academic background.
+            </p>
+
+            {workExperience.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1.25rem' }}>
+                {workExperience.map((exp, index) => (
+                  <div
+                    key={exp.id || index}
+                    style={{
+                      padding: '0.85rem 1rem',
+                      backgroundColor: 'var(--color-bg-secondary)',
+                      borderRadius: 'var(--radius-sm)',
+                      border: '1px solid var(--color-border)',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'flex-start',
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontWeight: '700', fontSize: '0.95rem', color: 'var(--color-text-primary)' }}>
+                        {exp.role || 'Contributor'}
+                        {exp.company && <span style={{ fontWeight: '400', color: 'var(--color-text-secondary)' }}> at {exp.company}</span>}
+                      </div>
+                      {exp.duration && (
+                        <div style={{ fontSize: '0.78rem', color: '#818cf8', marginTop: '0.15rem' }}>
+                          {exp.duration}
+                        </div>
+                      )}
+                      {exp.description && (
+                        <div style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', marginTop: '0.35rem', lineHeight: 1.4 }}>
+                          {exp.description}
+                        </div>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveExperience(index)}
+                      className="chip-remove"
+                      style={{ padding: '0.3rem', color: 'var(--color-text-muted)' }}
+                      title="Remove experience"
+                    >
+                      <CloseIcon size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', fontStyle: 'italic', marginBottom: '1rem' }}>
+                No experience entries added yet. Use the form below to add your background.
+              </p>
+            )}
+
+            {/* Add Experience Form */}
+            <form onSubmit={handleAddExperience} style={{ padding: '1rem', backgroundColor: 'var(--color-bg)', borderRadius: 'var(--radius-sm)', border: '1px dashed var(--color-border)' }}>
+              <div style={{ fontWeight: '600', fontSize: '0.88rem', marginBottom: '0.75rem', color: 'var(--color-text-primary)' }}>
+                Add New Experience Entry
+              </div>
+              <div className="grid grid-cols-3" style={{ gap: '0.75rem', marginBottom: '0.75rem' }}>
+                <input
+                  type="text"
+                  className="form-input"
+                  placeholder="Role / Title (e.g. ML Researcher)"
+                  value={newExpRole}
+                  onChange={(e) => setNewExpRole(e.target.value)}
+                />
+                <input
+                  type="text"
+                  className="form-input"
+                  placeholder="Organization / Company (e.g. Tech Lab)"
+                  value={newExpCompany}
+                  onChange={(e) => setNewExpCompany(e.target.value)}
+                />
+                <input
+                  type="text"
+                  className="form-input"
+                  placeholder="Duration (e.g. 2023 - Present)"
+                  value={newExpDuration}
+                  onChange={(e) => setNewExpDuration(e.target.value)}
+                />
+              </div>
+              <div style={{ display: 'flex', gap: '0.75rem' }}>
+                <input
+                  type="text"
+                  className="form-input"
+                  style={{ flex: 1 }}
+                  placeholder="Brief summary of duties, courses taught, or achievements"
+                  value={newExpDesc}
+                  onChange={(e) => setNewExpDesc(e.target.value)}
+                />
+                <button type="submit" className="btn btn-secondary">
+                  Add Entry
+                </button>
+              </div>
+            </form>
+          </div>
+
+          {/* Section 5: Social Profiles Form & Safe External Links */}
+          <div className="card" id="socials">
+            <h2 className="card-title">Social Profiles & Links</h2>
+            <p className="card-subtitle">
+              Connect your verified external profiles. Links open safely in a new tab without exposing window context.
+            </p>
+
+            <div className="grid grid-cols-2" style={{ gap: '1rem', marginBottom: '1.25rem' }}>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label" htmlFor="social-github">GitHub Profile / Username</label>
+                <input
+                  id="social-github"
+                  type="text"
+                  className="form-input"
+                  placeholder="username or https://github.com/username"
+                  value={socialProfiles.github || ''}
+                  onChange={(e) => setSocialProfiles({ ...socialProfiles, github: e.target.value })}
+                />
+              </div>
+
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label" htmlFor="social-linkedin">LinkedIn Profile / URL</label>
+                <input
+                  id="social-linkedin"
+                  type="text"
+                  className="form-input"
+                  placeholder="username or https://linkedin.com/in/username"
+                  value={socialProfiles.linkedin || ''}
+                  onChange={(e) => setSocialProfiles({ ...socialProfiles, linkedin: e.target.value })}
+                />
+              </div>
+
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label" htmlFor="social-website">Personal Website / Portfolio</label>
+                <input
+                  id="social-website"
+                  type="text"
+                  className="form-input"
+                  placeholder="https://yourportfolio.dev"
+                  value={socialProfiles.website || ''}
+                  onChange={(e) => setSocialProfiles({ ...socialProfiles, website: e.target.value })}
+                />
+              </div>
+
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label" htmlFor="social-twitter">Twitter / X Profile</label>
+                <input
+                  id="social-twitter"
+                  type="text"
+                  className="form-input"
+                  placeholder="handle or https://twitter.com/handle"
+                  value={socialProfiles.twitter || ''}
+                  onChange={(e) => setSocialProfiles({ ...socialProfiles, twitter: e.target.value })}
+                />
+              </div>
+            </div>
+
+            {/* Live Safe External Previews */}
+            <div style={{ paddingTop: '0.85rem', borderTop: '1px solid var(--color-border)', display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+              <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: '600' }}>
+                Preview Links:
+              </span>
+              {socialProfiles.github && (
+                <a
+                  href={formatSocialUrl('github', socialProfiles.github)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn btn-sm btn-outline"
+                >
+                  GitHub Profile ↗
+                </a>
+              )}
+              {socialProfiles.linkedin && (
+                <a
+                  href={formatSocialUrl('linkedin', socialProfiles.linkedin)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn btn-sm btn-outline"
+                >
+                  LinkedIn Profile ↗
+                </a>
+              )}
+              {socialProfiles.website && (
+                <a
+                  href={formatSocialUrl('website', socialProfiles.website)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn btn-sm btn-outline"
+                >
+                  Portfolio Website ↗
+                </a>
+              )}
+              {socialProfiles.twitter && (
+                <a
+                  href={formatSocialUrl('twitter', socialProfiles.twitter)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn btn-sm btn-outline"
+                >
+                  Twitter / X ↗
+                </a>
+              )}
+              {!socialProfiles.github && !socialProfiles.linkedin && !socialProfiles.website && !socialProfiles.twitter && (
+                <span style={{ fontSize: '0.82rem', color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
+                  No social profiles entered yet.
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Section 6: Skills I Can Teach & Verification Quizzes */}
+          <div className="card" id="teaching">
+            <span id="skills" style={{ display: 'block', position: 'relative', top: '-10px', visibility: 'hidden' }} />
+            <span id="verified" style={{ display: 'block', position: 'relative', top: '-10px', visibility: 'hidden' }} />
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
               <h2 className="card-title" style={{ margin: 0 }}>
-                Skills I Can Teach
+                Skills I Can Teach & Verified Badges
               </h2>
               <span className="badge badge-volunteer">Mentoring</span>
             </div>
@@ -702,8 +1113,8 @@ export function SkillProfile() {
             </div>
           )}
 
-          {/* Section 4: Skills I Want to Learn */}
-          <div className="card">
+          {/* Section 7: Skills I Want to Learn */}
+          <div className="card" id="learning">
             <h2 className="card-title">Skills I Want to Learn</h2>
             <p className="card-subtitle">
               Add topics you wish to study. The recommendation engine matches you with qualified peer mentors.

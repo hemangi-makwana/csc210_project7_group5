@@ -24,6 +24,7 @@ import { LearningHistory } from './pages/LearningHistory.jsx';
 import { SkillProfile } from './pages/SkillProfile.jsx';
 import { CourseRequests } from './pages/CourseRequests.jsx';
 import { Notifications } from './pages/Notifications.jsx';
+import { Messages } from './pages/Messages.jsx';
 import { Login } from './pages/Login.jsx';
 import { Register } from './pages/Register.jsx';
 
@@ -73,6 +74,7 @@ export function App() {
             <Route path="/profile" element={<SkillProfile />} />
             <Route path="/requests" element={<CourseRequests />} />
             <Route path="/notifications" element={<Notifications />} />
+            <Route path="/messages" element={<Messages />} />
             <Route path="/login" element={<Navigate to="/" replace />} />
             <Route path="/register" element={<Navigate to="/" replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />

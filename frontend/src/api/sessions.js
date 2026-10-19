@@ -38,8 +38,9 @@ export async function bookSession(bookingData) {
  * @param {string} userId - User's ID.
  * @returns {Promise<{sessions: Array, isMock?: boolean}>}
  */
-export async function getUserSessions(userId) {
-  return await request(`/users/${userId}/history`, {
+export async function getUserSessions(userId, role = null) {
+  const queryParam = role ? `?role=${encodeURIComponent(role)}` : '';
+  return await request(`/users/${userId}/history${queryParam}`, {
     method: 'GET',
   });
 }
