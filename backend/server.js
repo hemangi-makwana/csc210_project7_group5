@@ -741,7 +741,7 @@ application.get("/api/skills/search", async (request, response) => {
                   ARRAY[s.skill_name]
                 ) as skills,
                 COALESCE(
-                  (SELECT json_agg(json_build_object('skill_name', s3.skill_name, 'level', s3.level, 'type', s3.type, 'is_verified', COALESCE(s3.is_verified, FALSE)))
+                  (SELECT jsonb_agg(jsonb_build_object('skill_name', s3.skill_name, 'level', s3.level, 'type', s3.type, 'is_verified', COALESCE(s3.is_verified, FALSE)))
                    FROM skills s3 WHERE s3.user_id = u.id AND s3.type = 'teach'),
                   '[]'::jsonb
                 ) as skill_entries
