@@ -9,6 +9,7 @@
 
 import React from 'react';
 import { Link } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext.jsx';
 import { StarRating } from './StarRating.jsx';
 import { VerifiedBadgeIcon } from './Icons.jsx';
 
@@ -26,8 +27,10 @@ function getRoleBadgeClass(role) {
   }
 }
 
-export function ProfileCard({ user, matchScore = null, matchReason = null }) {
+export function ProfileCard({ user, matchScore = null, matchReason = null, breakdown = null }) {
+  const { isLearner } = useAuth();
   if (!user) return null;
+
 
   // Separate taught skills and wanted skills
   const taughtSkills = (user.skills || []).filter(s => typeof s === 'string' || s.type === 'teach');
@@ -85,14 +88,8 @@ export function ProfileCard({ user, matchScore = null, matchReason = null }) {
               </span>
               {user.is_demo && (
                 <span
-                  className="badge"
-                  style={{
-                    backgroundColor: 'rgba(99, 102, 241, 0.15)',
-                    color: '#a5b4fc',
-                    border: '1px solid rgba(99, 102, 241, 0.3)',
-                    fontSize: '0.7rem',
-                  }}
-                  title="Curated database-backed demo profile"
+                  className="badge badge-demo"
+                  title="Sample mentor profile for demonstration"
                 >
                   Demo Profile
                 </span>
@@ -102,48 +99,17 @@ export function ProfileCard({ user, matchScore = null, matchReason = null }) {
         </div>
 
         <div>
-          <StarRating rating={user.reputation_score || user.reputationScore || 5.0} />
+          <StarRating
+            rating={user.reputation_score !== undefined ? user.reputation_score : (user.reputationScore || 0)}
+            count={user.review_count !== undefined ? user.review_count : (user.reviews_count !== undefined ? user.reviews_count : (user.reviews ? user.reviews.length : null))}
+          />
         </div>
       </div>
-
-      {/* Algorithmic Match Score (from MaxHeap recommendation engine) */}
-      {matchScore !== null && (
-        <div style={{
-          backgroundColor: 'rgba(16, 185, 129, 0.1)',
-          border: '1px solid rgba(16, 185, 129, 0.25)',
-          borderRadius: 'var(--radius-sm)',
-          padding: '0.45rem 0.75rem',
-          fontSize: '0.82rem',
-          color: '#34d399',
-          marginBottom: '0.85rem',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center'
-        }}>
-          <span><strong>Match Score:</strong></span>
-          <span style={{ fontWeight: '700' }}>{matchScore}%</span>
-        </div>
-      )}
 
       {/* Bio / Headline */}
       <p style={{ fontSize: '0.9rem', color: 'var(--color-text-secondary)', marginBottom: '1.25rem', flex: 1, lineHeight: 1.5 }}>
         {user.bio || user.profile_summary || 'Community mentor exchanging technical and academic skills.'}
       </p>
-
-      {/* Match Reason (if provided) */}
-      {matchReason && (
-        <div style={{
-          fontSize: '0.82rem',
-          color: '#7dd3fc',
-          backgroundColor: 'rgba(14, 165, 233, 0.1)',
-          border: '1px solid rgba(14, 165, 233, 0.25)',
-          padding: '0.45rem 0.65rem',
-          borderRadius: 'var(--radius-sm)',
-          marginBottom: '1rem'
-        }}>
-          {matchReason}
-        </div>
-      )}
 
       {/* Taught Skills with Teacher Verification Badges */}
       <div style={{ marginBottom: '1rem' }}>
@@ -163,13 +129,15 @@ export function ProfileCard({ user, matchScore = null, matchReason = null }) {
                   <span>{skillName}</span>
                   {skillLevel && <span className="chip-level">{skillLevel}</span>}
                   {isVerified && (
-                    <span
+                    <Link
+                      to="/teacher-verification"
                       className="badge badge-verified"
-                      title="Verified Teacher: Passed domain verification quiz"
+                      title="Verified Teacher: Qualified via verified credentials. View verification records."
+                      style={{ textDecoration: 'none' }}
                     >
                       <VerifiedBadgeIcon size={12} />
                       <span>Verified</span>
-                    </span>
+                    </Link>
                   )}
                 </span>
               );
@@ -201,13 +169,15 @@ export function ProfileCard({ user, matchScore = null, matchReason = null }) {
 
       {/* Action Footer */}
       <div style={{ marginTop: 'auto', paddingTop: '0.75rem', borderTop: '1px solid var(--color-border-subtle)', display: 'flex', gap: '0.5rem' }}>
-        <Link
-          to={`/booking?mentorId=${encodeURIComponent(user.id || user.userId || '')}&mentorName=${encodeURIComponent(user.name || '')}`}
-          className="btn btn-primary"
-          style={{ flex: 1, textAlign: 'center' }}
-        >
-          Book Session
-        </Link>
+        {isLearner && (
+          <Link
+            to={`/booking?mentorId=${encodeURIComponent(user.id || user.userId || '')}&mentorName=${encodeURIComponent(user.name || '')}`}
+            className="btn btn-primary"
+            style={{ flex: 1, textAlign: 'center' }}
+          >
+            Book Session
+          </Link>
+        )}
         <Link
           to={`/messages?userId=${encodeURIComponent(user.id || user.userId || '')}&name=${encodeURIComponent(user.name || '')}`}
           className="btn btn-secondary"
@@ -219,3 +189,4 @@ export function ProfileCard({ user, matchScore = null, matchReason = null }) {
     </div>
   );
 }
+

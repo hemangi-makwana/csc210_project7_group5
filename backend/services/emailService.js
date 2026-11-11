@@ -131,9 +131,19 @@ async function notifyNewMessage({ recipientEmail, recipientName, senderName, pre
   return sendEmailNotification({ to: recipientEmail, subject, text });
 }
 
+async function sendNotificationEmail({ recipientEmail, recipientName, subject, title, message, actionUrl, actionText }) {
+  if (!recipientEmail) return { delivered: false };
+  return sendEmailNotification({
+    to: recipientEmail,
+    subject: subject || "Skill Exchange Notification",
+    text: `${title ? `${title}\n\n` : ""}${message || ""}\n\n${actionUrl ? `Visit: ${actionUrl}` : ""}`,
+  });
+}
+
 module.exports = {
   isSmtpConfigured,
   sendEmailNotification,
+  sendNotificationEmail,
   notifyBookingEvent,
   notifyCourseMatch,
   notifyNewMessage,

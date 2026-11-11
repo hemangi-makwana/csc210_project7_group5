@@ -36,3 +36,16 @@ export async function getAllCourseRequests() {
     method: 'GET',
   });
 }
+
+/**
+ * Responds to a course request as a qualified teacher.
+ * @param {string} requestId
+ * @param {string} message
+ */
+export async function respondToCourseRequest(requestId, message) {
+  return await request(`/course-requests/${requestId}/respond`, {
+    method: 'POST',
+    body: JSON.stringify({ message }),
+  });
+}
+

@@ -13,7 +13,7 @@ import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { BRAND } from '../constants/brand.js';
 import { getUserProfile } from '../api/skills.js';
-import { getUserSessions } from '../api/sessions.js';
+import { getUserSessions, getAvailableCourses } from '../api/sessions.js';
 import { getMyCourseRequests, getAllCourseRequests } from '../api/courseRequests.js';
 import { getMyNotifications } from '../api/notifications.js';
 import {
@@ -29,6 +29,7 @@ import {
   VerifiedBadgeIcon,
   ChevronRightIcon,
   UserIcon,
+  ShieldCheckIcon,
 } from '../components/Icons.jsx';
 
 /**
@@ -61,6 +62,12 @@ export function Home() {
   const [allRequests, setAllRequests] = useState([]);
   const [notifications, setNotifications] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+
+  // Available Courses state
+  const [availableCourses, setAvailableCourses] = useState([]);
+  const [courseCategory, setCourseCategory] = useState('');
+  const [courseSearch, setCourseSearch] = useState('');
+  const [isLoadingCourses, setIsLoadingCourses] = useState(false);
 
   const activeUserId = user ? user.id : 'usr_002';
   const userName = user ? user.name : 'Community Member';
@@ -110,6 +117,27 @@ export function Home() {
     };
   }, [activeUserId, user]);
 
+  useEffect(() => {
+    let isMounted = true;
+    async function loadCourses() {
+      setIsLoadingCourses(true);
+      try {
+        const res = await getAvailableCourses(courseCategory, courseSearch);
+        if (isMounted && res && Array.isArray(res.courses)) {
+          setAvailableCourses(res.courses);
+        }
+      } catch (err) {
+        console.error('Failed to load available courses:', err);
+      } finally {
+        if (isMounted) setIsLoadingCourses(false);
+      }
+    }
+    loadCourses();
+    return () => {
+      isMounted = false;
+    };
+  }, [courseCategory, courseSearch]);
+
   // Derived counts
   const allSkills = (profileData && profileData.skills) || (user && user.skills) || [];
   const teachSkills = allSkills.filter(s => typeof s === 'string' || s.type === 'teach');
@@ -145,7 +173,16 @@ export function Home() {
       {/* 1. Greeting Hero Banner (inspired by reference Image 3) */}
       <section className="greeting-card">
         <div className="greeting-avatar">
-          {getInitials(userName)}
+          {(profileData?.avatar_url || user?.avatar_url) ? (
+            <img
+              src={profileData?.avatar_url || user?.avatar_url}
+              alt={userName}
+              style={{ width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover' }}
+              onError={(e) => { e.target.style.display = 'none'; }}
+            />
+          ) : (
+            getInitials(userName)
+          )}
         </div>
         <div>
           <h1 className="greeting-title">
@@ -158,6 +195,7 @@ export function Home() {
           </p>
         </div>
       </section>
+
 
       {/* 2. Stat Summary Cards Grid (Adaptive to Mode) */}
       <section className="stat-grid">
@@ -252,29 +290,30 @@ export function Home() {
               <ChevronRightIcon size={18} className="stat-desc" />
             </Link>
 
-            <Link to="/profile#verified" className="stat-card">
+            <Link to="/teacher-verification" className="stat-card">
               <div className="stat-icon-wrapper stat-icon-emerald">
                 <VerifiedBadgeIcon size={24} />
               </div>
               <div style={{ flex: 1 }}>
                 <div className="stat-value">{verifiedTeachSkills.length}</div>
                 <div className="stat-label">Verified Badges</div>
-                <div className="stat-desc">Quiz-verified skills</div>
+                <div className="stat-desc">Verified skills</div>
               </div>
               <ChevronRightIcon size={18} className="stat-desc" />
             </Link>
 
-            <Link to="/booking" className="stat-card">
+            <Link to="/history?view=teaching" className="stat-card">
               <div className="stat-icon-wrapper stat-icon-blue">
                 <CalendarIcon size={24} />
               </div>
               <div style={{ flex: 1 }}>
                 <div className="stat-value">{sessions.length}</div>
-                <div className="stat-label">Teaching Bookings</div>
-                <div className="stat-desc">Queued and confirmed</div>
+                <div className="stat-label">Teaching Sessions</div>
+                <div className="stat-desc">Active and completed</div>
               </div>
               <ChevronRightIcon size={18} className="stat-desc" />
             </Link>
+
 
             <Link to="/requests" className="stat-card">
               <div className="stat-icon-wrapper stat-icon-amber">
@@ -372,11 +411,11 @@ export function Home() {
 
           <div style={{ padding: '1rem', backgroundColor: 'var(--color-bg-secondary)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
             <h3 style={{ fontSize: '1rem', fontWeight: '700', color: 'var(--color-text-primary)', marginBottom: '0.35rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <VerifiedBadgeIcon size={18} />
-              <span>Teacher Verification Quizzes</span>
+              <ShieldCheckIcon size={18} />
+              <span>Teacher Document Verification</span>
             </h3>
             <p style={{ fontSize: '0.88rem', color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
-              Teachers qualify for verified badges by achieving 70% or higher on skill-specific 10-question multiple choice quizzes.
+              Teachers qualify for verified status by submitting resume and certificate credentials reviewed by designated administrators.
             </p>
           </div>
 
@@ -393,16 +432,204 @@ export function Home() {
           <div style={{ padding: '1rem', backgroundColor: 'var(--color-bg-secondary)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
             <h3 style={{ fontSize: '1rem', fontWeight: '700', color: 'var(--color-text-primary)', marginBottom: '0.35rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <CalendarIcon size={18} />
-              <span>Chronological Session Booking</span>
+              <span>1:1 Session Scheduling</span>
             </h3>
             <p style={{ fontSize: '0.88rem', color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
-              Arrange learning sessions with mentors. Bookings are handled fairly in the order received.
+              Arrange personalized learning sessions with qualified mentors at mutually convenient times.
             </p>
           </div>
         </div>
       </section>
 
-      {/* 5. Quick Actions & Recent Alerts Grid */}
+      {/* 5. Available Courses with Approved Teachers */}
+      <section className="card" style={{ marginBottom: '2rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', marginBottom: '1.25rem' }}>
+          <div>
+            <h2 className="card-title" style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <SkillsIcon size={22} style={{ color: 'var(--color-primary)' }} />
+              <span>Available Courses with Approved Teachers</span>
+            </h2>
+            <p className="card-subtitle" style={{ margin: '0.25rem 0 0' }}>
+              Explore catalog courses led by verified peer mentors ready for exchange sessions
+            </p>
+          </div>
+          <Link to="/requests" className="btn btn-sm btn-outline" style={{ gap: '0.35rem' }}>
+            <span>Cannot find your topic? Request it</span>
+            <ChevronRightIcon size={14} />
+          </Link>
+        </div>
+
+        {/* Filters bar */}
+        <div className="courses-search-bar" style={{ marginBottom: '1.5rem' }}>
+          <div className="courses-search-wrapper">
+            <span className="courses-search-icon">
+              <SearchIcon size={20} />
+            </span>
+            <input
+              type="text"
+              className="courses-search-input"
+              placeholder="Search course title or description..."
+              value={courseSearch}
+              onChange={(e) => setCourseSearch(e.target.value)}
+              aria-label="Search available courses"
+            />
+          </div>
+          <div style={{ flex: '0 0 auto' }}>
+            <select
+              className="courses-category-select"
+              value={courseCategory}
+              onChange={(e) => setCourseCategory(e.target.value)}
+              aria-label="Filter by course category"
+            >
+              <option value="">All Categories</option>
+              <option value="Programming & Software">Programming & Software</option>
+              <option value="Data Science & AI">Data Science & AI</option>
+              <option value="Cloud & DevOps">Cloud & DevOps</option>
+              <option value="UI/UX & Design">UI/UX & Design</option>
+              <option value="Productivity & Analytics">Productivity & Analytics</option>
+              <option value="Academics & Mathematics">Academics & Mathematics</option>
+              <option value="Languages & Communication">Languages & Communication</option>
+              <option value="Arts & Creative">Arts & Creative</option>
+              <option value="Social Sciences & Psychology">Social Sciences & Psychology</option>
+              <option value="Sports & Athletics">Sports & Athletics</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Courses Grid */}
+        {isLoadingCourses ? (
+          <div style={{ textAlign: 'center', padding: '3rem 1rem', color: 'var(--color-text-muted)' }}>
+            <p>Loading available courses...</p>
+          </div>
+        ) : availableCourses.length > 0 ? (
+          <div className="grid grid-cols-2" style={{ gap: '1.25rem' }}>
+            {availableCourses.map((course) => (
+              <div
+                key={course.id}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  justifyContent: 'space-between',
+                  padding: '1.25rem',
+                  backgroundColor: 'var(--color-bg-secondary)',
+                  border: '1px solid var(--color-border)',
+                  borderRadius: 'var(--radius-md)',
+                }}
+              >
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                    <h3 style={{ fontSize: '1.05rem', fontWeight: '700', color: 'var(--color-text-primary)', margin: 0 }}>
+                      {course.name}
+                    </h3>
+                    <span
+                      style={{
+                        fontSize: '0.75rem',
+                        fontWeight: '600',
+                        padding: '0.2rem 0.55rem',
+                        borderRadius: '9999px',
+                        backgroundColor: 'var(--color-surface-elevated)',
+                        color: 'var(--color-primary)',
+                        border: '1px solid var(--color-border)',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {course.category}
+                    </span>
+                  </div>
+                  <p style={{ fontSize: '0.86rem', color: 'var(--color-text-muted)', lineHeight: 1.5, marginBottom: '1rem' }}>
+                    {course.description || 'Verified course offering 1:1 mentorship and practical exchange.'}
+                  </p>
+                </div>
+
+                <div>
+                  <div style={{ borderTop: '1px solid var(--color-border)', paddingTop: '0.75rem', marginBottom: '0.85rem' }}>
+                    <div style={{ fontSize: '0.75rem', fontWeight: '600', color: 'var(--color-text-muted)', marginBottom: '0.4rem', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                      Approved Teachers ({course.teacher_count || (course.teachers && course.teachers.length) || 1})
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+                      {(course.teachers || []).slice(0, 3).map((teacher) => (
+                        <div
+                          key={teacher.id}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.4rem',
+                            padding: '0.25rem 0.5rem',
+                            borderRadius: 'var(--radius-sm)',
+                            backgroundColor: 'var(--color-surface-elevated)',
+                            border: '1px solid var(--color-border)',
+                            fontSize: '0.8rem',
+                          }}
+                        >
+                          <div
+                            style={{
+                              width: '20px',
+                              height: '20px',
+                              borderRadius: '50%',
+                              backgroundColor: 'var(--color-primary)',
+                              color: '#fff',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              fontSize: '0.65rem',
+                              fontWeight: '700',
+                              overflow: 'hidden',
+                            }}
+                          >
+                            {teacher.avatar_url ? (
+                              <img src={teacher.avatar_url} alt={teacher.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} onError={(e) => { e.target.style.display = 'none'; }} />
+                            ) : (
+                              getInitials(teacher.name)
+                            )}
+                          </div>
+                          <span style={{ fontWeight: '500', color: 'var(--color-text-primary)' }}>{teacher.name}</span>
+                          <span style={{ color: 'var(--color-text-muted)', fontSize: '0.75rem' }}>
+                            ★ {Number(teacher.reputation_score || 5.0).toFixed(1)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <Link
+                    to={`/booking?skill=${encodeURIComponent(course.name)}&mentorId=${course.teachers && course.teachers[0] ? course.teachers[0].id : ''}`}
+                    className="btn btn-primary btn-sm"
+                    style={{ width: '100%', justifyContent: 'center' }}
+                  >
+                    <span>Book Session</span>
+                    <ChevronRightIcon size={14} />
+                  </Link>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div
+            style={{
+              textAlign: 'center',
+              padding: '2.5rem 1.5rem',
+              color: 'var(--color-text-muted)',
+              border: '1px dashed var(--color-border)',
+              borderRadius: 'var(--radius-md)',
+              backgroundColor: 'var(--color-bg-secondary)',
+            }}
+          >
+            <RequestIcon size={32} style={{ opacity: 0.5, marginBottom: '0.5rem' }} />
+            <h3 style={{ fontSize: '1rem', fontWeight: '600', color: 'var(--color-text-primary)', marginBottom: '0.35rem' }}>
+              No Approved Courses Found
+            </h3>
+            <p style={{ fontSize: '0.88rem', maxWidth: '440px', margin: '0 auto 1.25rem', lineHeight: 1.5 }}>
+              There are currently no verified teachers available for this topic. You can post a course request to alert verified educators!
+            </p>
+            <Link to="/requests" className="btn btn-secondary btn-sm" style={{ gap: '0.35rem' }}>
+              <RequestIcon size={14} />
+              <span>Post a Course Request</span>
+            </Link>
+          </div>
+        )}
+      </section>
+
+      {/* 6. Quick Actions & Recent Alerts Grid */}
       <div className="grid grid-cols-2" style={{ gap: '1.5rem', marginBottom: '2.5rem' }}>
         {/* Quick Actions Card */}
         <div className="card">
@@ -437,22 +664,23 @@ export function Home() {
                   <SkillsIcon size={18} />
                   <span>Manage Teachable Skills</span>
                 </Link>
-                <Link to="/profile" className="btn btn-secondary" style={{ justifyContent: 'flex-start' }}>
+                <Link to="/teacher-verification" className="btn btn-secondary" style={{ justifyContent: 'flex-start' }}>
                   <VerifiedBadgeIcon size={18} />
-                  <span>Take Skill Verification Quiz</span>
+                  <span>Teacher Verification Portal</span>
                 </Link>
                 <Link to="/requests" className="btn btn-outline" style={{ justifyContent: 'flex-start' }}>
                   <RequestIcon size={18} />
                   <span>Browse Learner Requests</span>
                 </Link>
-                <Link to="/booking" className="btn btn-outline" style={{ justifyContent: 'flex-start' }}>
+                <Link to="/history?view=teaching" className="btn btn-outline" style={{ justifyContent: 'flex-start' }}>
                   <CalendarIcon size={18} />
-                  <span>Review Booking Requests</span>
+                  <span>View Teaching Sessions</span>
                 </Link>
               </>
             )}
           </div>
         </div>
+
 
         {/* Recent Alerts / Notifications Card (inspired by reference Image 5) */}
         <div className="card">

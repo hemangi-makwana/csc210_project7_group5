@@ -25,26 +25,54 @@ import { SkillProfile } from './pages/SkillProfile.jsx';
 import { CourseRequests } from './pages/CourseRequests.jsx';
 import { Notifications } from './pages/Notifications.jsx';
 import { Messages } from './pages/Messages.jsx';
+import { TeacherVerification } from './pages/TeacherVerification.jsx';
+import { AvailableCourses } from './pages/AvailableCourses.jsx';
+import ReviewerPortal from './pages/ReviewerPortal.jsx';
 import { Login } from './pages/Login.jsx';
 import { Register } from './pages/Register.jsx';
+import { ErrorBoundary } from './components/ErrorBoundary.jsx';
+import { Loader } from './components/Feedback.jsx';
+
 
 export function App() {
-  const { isAuthenticated, isLoading } = useAuth();
+  const { isAuthenticated, isLoading, sessionExpired } = useAuth();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const location = useLocation();
 
   // Pure auth routes that use full-screen banner layout
   const isAuthRoute = location.pathname === '/login' || location.pathname === '/register';
 
-  // If unauthenticated user opens root '/', display Login directly
-  const showLoginAtRoot = !isLoading && !isAuthenticated && location.pathname === '/';
+  // Initial application startup while validating stored session in localStorage/backend
+  if (isLoading) {
+    return (
+      <div style={{ display: 'flex', minHeight: '100vh', alignItems: 'center', justifyContent: 'center' }}>
+        <Loader message="Loading SkillExchange..." />
+      </div>
+    );
+  }
 
-  if (isAuthRoute || showLoginAtRoot) {
+  // When unauthenticated or session has expired, guide user through auth with clear recovery path
+  if (!isAuthenticated) {
+    if (!isAuthRoute) {
+      const isRoot = location.pathname === '/';
+      const redirectParam = !isRoot ? `redirect=${encodeURIComponent(location.pathname + location.search)}` : '';
+      const expiredParam = sessionExpired ? 'expired=true' : '';
+      const queryParts = [redirectParam, expiredParam].filter(Boolean).join('&');
+      const targetQuery = queryParts ? `?${queryParts}` : '';
+
+      return (
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
+          <Route path="*" element={<Navigate to={`/login${targetQuery}`} replace />} />
+        </Routes>
+      );
+    }
+
     return (
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
-        <Route path="/" element={<Login />} />
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     );
@@ -67,12 +95,23 @@ export function App() {
         <main style={{ flex: 1 }}>
           <Routes>
             <Route path="/" element={<Home />} />
+            <Route path="/courses" element={<AvailableCourses />} />
             <Route path="/search" element={<MentorSearch />} />
             <Route path="/recommendations" element={<Recommendations />} />
             <Route path="/booking" element={<SessionBooking />} />
             <Route path="/history" element={<LearningHistory />} />
             <Route path="/profile" element={<SkillProfile />} />
+            <Route
+              path="/teacher-verification"
+              element={
+                <ErrorBoundary pageName="Teacher Verification">
+                  <TeacherVerification />
+                </ErrorBoundary>
+              }
+            />
+            <Route path="/reviewer" element={<ReviewerPortal />} />
             <Route path="/requests" element={<CourseRequests />} />
+
             <Route path="/notifications" element={<Notifications />} />
             <Route path="/messages" element={<Messages />} />
             <Route path="/login" element={<Navigate to="/" replace />} />

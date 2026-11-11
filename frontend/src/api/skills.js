@@ -106,3 +106,14 @@ export async function uploadAvatar(userId, file) {
   return data;
 }
 
+/**
+ * Retrieves the canonical database-backed skill and course catalog.
+ * @returns {Promise<{catalog: Array<{id: string, name: string, domain: string, category: string, description: string}>, count: number}>}
+ */
+export async function getSkillCatalog() {
+  return await request('/skills/catalog', {
+    method: 'GET',
+  });
+}
+
+

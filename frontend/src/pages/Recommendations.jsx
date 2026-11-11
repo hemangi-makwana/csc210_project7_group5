@@ -16,12 +16,13 @@ import { Loader, EmptyState, ErrorState } from '../components/Feedback.jsx';
 import { SparklesIcon, SkillsIcon } from '../components/Icons.jsx';
 
 export function Recommendations() {
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, isTeacher, setMode } = useAuth();
   const [recommendationList, setRecommendationList] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState(null);
 
   async function fetchRecommendations() {
+    if (isTeacher) return;
     const activeUserId = user ? user.id : 'usr_002';
     setIsLoading(true);
     setErrorMessage(null);
@@ -39,7 +40,42 @@ export function Recommendations() {
 
   useEffect(() => {
     fetchRecommendations();
-  }, [user]);
+  }, [user, isTeacher]);
+
+  if (isTeacher) {
+    return (
+      <div className="page" style={{ maxWidth: '720px', marginTop: '2rem' }}>
+        <div className="card" style={{ textAlign: 'center', padding: '3rem 2rem' }}>
+          <div style={{
+            width: '64px',
+            height: '64px',
+            borderRadius: '50%',
+            backgroundColor: 'rgba(37, 99, 235, 0.15)',
+            color: 'var(--color-learner)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            margin: '0 auto 1.25rem'
+          }}>
+            <SparklesIcon size={32} />
+          </div>
+          <h2 className="page-title" style={{ fontSize: '1.4rem', marginBottom: '0.5rem' }}>
+            Mentor Recommendations
+          </h2>
+          <p style={{ color: 'var(--color-text-secondary)', fontSize: '0.95rem', lineHeight: 1.5, maxWidth: '480px', margin: '0 auto 1.5rem' }}>
+            Mentor recommendations are reserved for <strong>Learner Mode</strong> to help students discover qualified teachers for their desired skills.
+          </p>
+          <button
+            onClick={() => setMode('learner')}
+            className="btn btn-primary"
+            style={{ margin: '0 auto' }}
+          >
+            Switch to Learner Mode
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="page">
@@ -51,19 +87,7 @@ export function Recommendations() {
         </p>
       </div>
 
-      {/* Algorithmic Context Note */}
-      <div style={{
-        backgroundColor: 'rgba(79, 70, 229, 0.1)',
-        border: '1px solid rgba(79, 70, 229, 0.25)',
-        borderRadius: 'var(--radius-md)',
-        padding: '0.85rem 1.25rem',
-        fontSize: '0.88rem',
-        color: '#c7d2fe',
-        marginBottom: '2rem',
-        lineHeight: 1.5,
-      }}>
-        <strong>Algorithmic Ranking:</strong> Candidate mentors are ranked by a priority score combining skill compatibility, peer ratings, and network proximity.
-      </div>
+
 
       {!isAuthenticated && (
         <div className="alert alert-info">
@@ -110,18 +134,10 @@ export function Recommendations() {
                 skills: mentor.skills || rec.skills || (mentor.teaches ? mentor.teaches.map(t => ({ skill_name: t, type: 'teach' })) : []),
               };
 
-              // Ensure score is strictly between 0% and 100% (never impossible values like 800%)
-              let rawScore = rec.matchScore !== undefined ? rec.matchScore : (rec.score !== undefined ? rec.score : 85);
-              if (rawScore > 0 && rawScore <= 1.0) {
-                rawScore = rawScore * 100;
-              }
-              const displayScore = Math.min(100, Math.max(0, Math.round(rawScore)));
-
               return (
                 <ProfileCard
                   key={mentorObj.id || index}
                   user={mentorObj}
-                  matchScore={displayScore}
                   matchReason={rec.matchReason || rec.reason || null}
                 />
               );

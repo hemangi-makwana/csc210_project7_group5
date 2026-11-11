@@ -13,20 +13,23 @@ import { bookSession } from '../api/sessions.js';
 import { getAllMentors } from '../api/skills.js';
 import { Loader, ErrorState, SuccessState } from '../components/Feedback.jsx';
 import { CalendarIcon, UserIcon, CheckIcon } from '../components/Icons.jsx';
+import { CustomSelect } from '../components/CustomSelect.jsx';
 
 export function SessionBooking() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, isTeacher, setMode } = useAuth();
+
 
   const preselectedMentorId = searchParams.get('mentorId') || '';
   const preselectedMentorName = searchParams.get('mentorName') || '';
+  const preselectedTopic = searchParams.get('skill') || searchParams.get('topic') || '';
 
   const [mentorId, setMentorId] = useState(preselectedMentorId);
   const [availableMentors, setAvailableMentors] = useState([]);
   const [scheduledDate, setScheduledDate] = useState('');
   const [scheduledTime, setScheduledTime] = useState('');
-  const [sessionTopic, setSessionTopic] = useState('');
+  const [sessionTopic, setSessionTopic] = useState(preselectedTopic);
   const [sessionNotes, setSessionNotes] = useState('');
 
   const [isLoading, setIsLoading] = useState(false);
@@ -80,12 +83,11 @@ export function SessionBooking() {
       };
 
       const response = await bookSession(payload);
-      setSuccessMessage(response.message || 'Session booked successfully!');
+      setSuccessMessage(response.message || 'Session booked successfully! Awaiting teacher confirmation.');
 
       setTimeout(() => {
-        setSessionTopic('');
-        setSessionNotes('');
-      }, 2000);
+        navigate('/history?view=learning');
+      }, 1500);
     } catch (error) {
       setErrorMessage(error.message || 'Failed to submit booking request.');
     } finally {
@@ -93,26 +95,55 @@ export function SessionBooking() {
     }
   }
 
+  if (isTeacher) {
+    return (
+      <div className="page" style={{ maxWidth: '720px', marginTop: '2rem' }}>
+        <div className="card" style={{ textAlign: 'center', padding: '3rem 2rem' }}>
+          <div style={{
+            width: '64px',
+            height: '64px',
+            borderRadius: '50%',
+            backgroundColor: 'rgba(139, 92, 246, 0.15)',
+            color: 'var(--color-teacher)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            margin: '0 auto 1.25rem'
+          }}>
+            <CalendarIcon size={32} />
+          </div>
+          <h2 className="page-title" style={{ fontSize: '1.4rem', marginBottom: '0.5rem' }}>
+            Book Mentor Session
+          </h2>
+          <p style={{ color: 'var(--color-text-secondary)', fontSize: '0.95rem', lineHeight: 1.5, maxWidth: '480px', margin: '0 auto 1.5rem' }}>
+            Booking sessions with mentors is a learning tool reserved for <strong>Learner Mode</strong>. As a teacher, view your upcoming teaching sessions and student bookings in Teaching History.
+          </p>
+          <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center' }}>
+            <button
+              onClick={() => setMode('learner')}
+              className="btn btn-primary"
+            >
+              Switch to Learner Mode
+            </button>
+            <Link to="/history?view=teaching" className="btn btn-secondary">
+              View Teaching Sessions
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="page" style={{ maxWidth: '780px' }}>
       <div className="page-header">
+
         <h1 className="page-title">Schedule a Mentoring Session</h1>
         <p className="page-subtitle">
           Arrange a 1:1 learning session with a peer or professional mentor in your community.
         </p>
       </div>
 
-      <div style={{
-        backgroundColor: 'rgba(79, 70, 229, 0.1)',
-        border: '1px solid rgba(79, 70, 229, 0.25)',
-        borderRadius: 'var(--radius-md)',
-        padding: '0.85rem 1.25rem',
-        fontSize: '0.88rem',
-        color: '#c7d2fe',
-        marginBottom: '2rem',
-      }}>
-        <strong>Chronological Processing:</strong> Booking requests are scheduled in chronological order, ensuring fair queue resolution without double-booking collisions.
-      </div>
 
       {successMessage && <SuccessState message={successMessage} />}
       {errorMessage && <ErrorState message={errorMessage} />}
@@ -126,23 +157,26 @@ export function SessionBooking() {
             {isFetchingMentors ? (
               <p style={{ fontSize: '0.9rem', color: 'var(--color-text-muted)' }}>Loading mentor directory...</p>
             ) : (
-              <select
+              <CustomSelect
                 id="mentor-select"
-                className="form-select"
                 value={mentorId}
-                onChange={(e) => setMentorId(e.target.value)}
+                onChange={(val) => setMentorId(val)}
+                placeholder="-- Choose a Mentor --"
                 required
-              >
-                <option value="">-- Choose a Mentor --</option>
-                {preselectedMentorId && preselectedMentorName && !availableMentors.some(m => m.id === preselectedMentorId) && (
-                  <option value={preselectedMentorId}>{preselectedMentorName}</option>
-                )}
-                {availableMentors.map((mentor) => (
-                  <option key={mentor.id} value={mentor.id}>
-                    {mentor.name} ({mentor.role}) — {mentor.skills?.filter(s => s.type === 'teach').map(s => s.skill_name).join(', ') || 'General Mentorship'}
-                  </option>
-                ))}
-              </select>
+                options={[
+                  ...(preselectedMentorId && preselectedMentorName && !availableMentors.some(m => m.id === preselectedMentorId)
+                    ? [{ value: preselectedMentorId, label: preselectedMentorName }]
+                    : []),
+                  ...availableMentors.map((mentor) => {
+                    const teachSkills = mentor.skills?.filter(s => s.type === 'teach').map(s => s.skill_name).join(', ');
+                    return {
+                      value: mentor.id,
+                      label: `${mentor.name} (${mentor.role || 'mentor'})`,
+                      subtext: teachSkills ? `Teaches: ${teachSkills}` : 'General Mentorship',
+                    };
+                  }),
+                ]}
+              />
             )}
             <small style={{ color: 'var(--color-text-muted)', marginTop: '0.35rem' }}>
               Want to see detailed profiles? <Link to="/search">Find mentors by skill</Link>.

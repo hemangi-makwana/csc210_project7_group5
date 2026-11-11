@@ -10,13 +10,14 @@ import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { BRAND } from '../constants/brand.js';
-import brandLogo from '../assets/logo.png';
+import logoLight from '../assets/logo-light.png';
+import logoDark from '../assets/logo-dark.png';
 import { ErrorState } from '../components/Feedback.jsx';
-import { EyeIcon, EyeOffIcon } from '../components/Icons.jsx';
+import { EyeIcon, EyeOffIcon, ShieldCheckIcon } from '../components/Icons.jsx';
 
 export function Login() {
   const navigate = useNavigate();
-  const { login } = useAuth();
+  const { login, setMode, isTeacher, isDarkMode } = useAuth();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -24,14 +25,22 @@ export function Login() {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState(null);
 
+  const searchParams = new URLSearchParams(window.location.search);
+  const redirectTarget = searchParams.get('redirect') || '/';
+  const targetMode = searchParams.get('mode');
+  const isSessionExpired = searchParams.get('expired') === 'true' || searchParams.get('reason') === 'expired';
+
   async function handleLoginSubmit(event) {
     event.preventDefault();
     setErrorMessage(null);
     setIsLoading(true);
 
     try {
-      await login(email, password);
-      navigate('/');
+      const loggedInUser = await login(email, password);
+      if (targetMode && (targetMode === 'teacher' || targetMode === 'learner')) {
+        await setMode(targetMode);
+      }
+      navigate(redirectTarget, { replace: true });
     } catch (error) {
       setErrorMessage(error.message || 'Login failed. Please check your credentials.');
     } finally {
@@ -51,7 +60,7 @@ export function Login() {
       <section className="auth-hero-banner">
         <div className="auth-hero-logo-wrapper">
           <img
-            src={brandLogo}
+            src={isDarkMode ? logoDark : logoLight}
             alt="Skill Exchange"
             className="auth-hero-logo"
           />
@@ -71,7 +80,30 @@ export function Login() {
             <p className="auth-card-sub">Sign in to your account to continue to your dashboard</p>
           </div>
 
-          {errorMessage && <ErrorState message={errorMessage} />}
+          {/* Session Expiration Recovery Banner */}
+          {isSessionExpired && (
+            <div
+              role="alert"
+              className="alert alert-warning"
+              style={{ marginBottom: '1.25rem', textAlign: 'left' }}
+            >
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.65rem' }}>
+                <ShieldCheckIcon size={20} style={{ flexShrink: 0, marginTop: '2px' }} />
+                <div>
+                  <strong>Session Expired</strong>
+                  <p style={{ margin: '0.2rem 0 0', fontSize: '0.85rem', lineHeight: 1.4 }}>
+                    Your session has ended or is no longer valid. Please sign in again to continue your work without losing your place.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {errorMessage && (
+            <div style={{ marginBottom: '1.25rem' }}>
+              <ErrorState message={errorMessage} />
+            </div>
+          )}
 
           <form onSubmit={handleLoginSubmit}>
             <div className="form-group">
@@ -142,23 +174,23 @@ export function Login() {
               <button
                 type="button"
                 className="btn btn-sm btn-secondary"
-                onClick={() => handleQuickFill('sarah.lin@example.com', 'password123')}
+                onClick={() => handleQuickFill('demo_user_1@skillexchange.demo', 'password123')}
               >
-                Teacher (Sarah Lin)
+                Teacher (Alice Chen)
               </button>
               <button
                 type="button"
                 className="btn btn-sm btn-secondary"
-                onClick={() => handleQuickFill('alex.rivera@example.com', 'password123')}
+                onClick={() => handleQuickFill('demo_user_2@skillexchange.demo', 'password123')}
               >
-                Learner (Alex Rivera)
+                Learner (Bob Smith)
               </button>
               <button
                 type="button"
                 className="btn btn-sm btn-secondary"
-                onClick={() => handleQuickFill('maya.chen@example.com', 'password123')}
+                onClick={() => handleQuickFill('demo_user_11@skillexchange.demo', 'password123')}
               >
-                Volunteer (Maya Chen)
+                Psychology (Dr. Reed)
               </button>
             </div>
           </div>

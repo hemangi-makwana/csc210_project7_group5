@@ -20,6 +20,8 @@ export function MentorSearch() {
   const [mentorList, setMentorList] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState(null);
+  const [searchSuggestion, setSearchSuggestion] = useState(null);
+  const [searchMessage, setSearchMessage] = useState(null);
 
   async function fetchMentors(query = '') {
     setIsLoading(true);
@@ -29,6 +31,8 @@ export function MentorSearch() {
       const response = await searchMentorsBySkill(query);
       const results = response.mentors || [];
       setMentorList(results);
+      setSearchSuggestion(response.suggestion || null);
+      setSearchMessage(response.message || null);
     } catch (error) {
       setErrorMessage(error.message || 'Failed to search mentors. Please try again.');
     } finally {
@@ -79,30 +83,12 @@ export function MentorSearch() {
             key={skill}
             type="button"
             onClick={() => handleTagClick(skill)}
-            className="chip"
-            style={{
-              cursor: 'pointer',
-              backgroundColor: searchQuery.toLowerCase() === skill.toLowerCase() ? 'rgba(79, 70, 229, 0.25)' : 'var(--color-surface)',
-              borderColor: searchQuery.toLowerCase() === skill.toLowerCase() ? 'var(--color-primary)' : 'var(--color-border)',
-              color: searchQuery.toLowerCase() === skill.toLowerCase() ? '#ffffff' : 'var(--color-text-secondary)',
-            }}
+            className={`chip ${searchQuery.toLowerCase() === skill.toLowerCase() ? 'chip-active' : ''}`}
+            style={{ cursor: 'pointer' }}
           >
             {skill}
           </button>
         ))}
-      </div>
-
-      {/* Technical Note */}
-      <div style={{
-        backgroundColor: 'rgba(79, 70, 229, 0.1)',
-        border: '1px solid rgba(79, 70, 229, 0.25)',
-        borderRadius: 'var(--radius-md)',
-        padding: '0.75rem 1.25rem',
-        fontSize: '0.85rem',
-        color: '#a5b4fc',
-        marginBottom: '2rem',
-      }}>
-        <strong>Search Index:</strong> Queries are executed through an indexed skill directory for fast, accurate keyword matching.
       </div>
 
       {isLoading && <Loader message="Searching available mentors..." />}
@@ -112,16 +98,45 @@ export function MentorSearch() {
       )}
 
       {!isLoading && !errorMessage && mentorList.length === 0 && (
-        <EmptyState
-          icon={<SearchIcon size={36} />}
-          title={`No mentors found matching "${searchQuery}"`}
-          description="Try searching for another skill, or submit a Course Request so mentors can see what you want to learn."
-          actionButton={
-            <button onClick={() => handleSearch('')} className="btn btn-secondary btn-sm">
-              View All Mentors
-            </button>
-          }
-        />
+        <div
+          className="card"
+          style={{
+            textAlign: 'center',
+            padding: '3rem 1.5rem',
+            backgroundColor: 'var(--color-bg-secondary)',
+            border: '1px dashed var(--color-border)',
+          }}
+        >
+          <SearchIcon size={36} style={{ color: 'var(--color-text-muted)', marginBottom: '0.75rem' }} />
+          <h2 style={{ fontSize: '1.25rem', fontWeight: '700', color: 'var(--color-text-primary)', marginBottom: '0.5rem' }}>
+            {searchSuggestion
+              ? `Did you mean "${searchSuggestion}"?`
+              : searchQuery
+                ? `No mentors found matching "${searchQuery}"`
+                : 'No mentors available'}
+          </h2>
+          <p style={{ color: 'var(--color-text-secondary)', maxWidth: '520px', margin: '0 auto 1.5rem', lineHeight: 1.55, fontSize: '0.92rem' }}>
+            {searchMessage || (searchQuery
+              ? `No mentors currently offer "${searchQuery}". Misspelled or unlisted course names are not automatically added to the catalog.`
+              : 'Check back later or browse available subjects.')}
+          </p>
+          <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center', flexWrap: 'wrap' }}>
+            {searchSuggestion && (
+              <button
+                type="button"
+                onClick={() => handleSearch(searchSuggestion)}
+                className="btn btn-primary btn-sm"
+              >
+                Search for "{searchSuggestion}"
+              </button>
+            )}
+            {searchQuery && (
+              <button onClick={() => handleSearch('')} className="btn btn-secondary btn-sm">
+                View All Mentors
+              </button>
+            )}
+          </div>
+        </div>
       )}
 
       {!isLoading && !errorMessage && mentorList.length > 0 && (

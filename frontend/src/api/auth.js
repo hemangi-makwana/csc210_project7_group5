@@ -48,3 +48,14 @@ export async function getUserProfile(userId) {
     method: 'GET',
   });
 }
+
+/**
+ * Validates the current session token with the backend and retrieves user profile.
+ * @returns {Promise<{user: object}>}
+ */
+export async function getMe() {
+  return await request('/auth/me', {
+    method: 'GET',
+  });
+}
+

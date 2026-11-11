@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS session_bookings (
   learner_id   VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   scheduled_at TIMESTAMP WITH TIME ZONE NOT NULL,
   status       VARCHAR(50) NOT NULL DEFAULT 'queued'
-               CHECK (status IN ('queued', 'pending', 'confirmed', 'completed', 'cancelled')),
+               CHECK (status IN ('queued', 'pending', 'accepted', 'confirmed', 'declined', 'completed', 'cancelled')),
   topic        VARCHAR(255),
   notes        TEXT,
   created_at   TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -130,18 +130,16 @@ CREATE TABLE IF NOT EXISTS reviews (
   comment     TEXT,
   created_at  TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+-- 8. RETIRED: Formerly quiz_attempts (retired; teacher verification is now document-based)
 
--- 8. TEACHER VERIFICATION QUIZ ATTEMPTS
--- Tracks skill verification quiz sessions, scores, and outcomes.
-CREATE TABLE IF NOT EXISTS quiz_attempts (
-  id           SERIAL PRIMARY KEY,
-  user_id      VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  skill_name   VARCHAR(100) NOT NULL,
-  score        INT NOT NULL,
-  total        INT NOT NULL DEFAULT 10,
-  percentage   NUMERIC(5, 2) NOT NULL,
-  passed       BOOLEAN NOT NULL,
-  created_at   TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+-- 8B. CANONICAL SKILL & COURSE CATALOG
+-- Authoritative database-backed registry of valid skills and courses across domains.
+CREATE TABLE IF NOT EXISTS skill_catalog (
+  id          SERIAL PRIMARY KEY,
+  name        VARCHAR(100) UNIQUE NOT NULL,
+  category    VARCHAR(100) NOT NULL,
+  description TEXT,
+  created_at  TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 9. USER CONNECTIONS / CONTACTS
@@ -168,17 +166,33 @@ CREATE TABLE IF NOT EXISTS conversations (
 );
 
 CREATE TABLE IF NOT EXISTS messages (
-  id              SERIAL PRIMARY KEY,
-  conversation_id INT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  sender_id       VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  content         TEXT NOT NULL,
-  is_read         BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+  id                       SERIAL PRIMARY KEY,
+  conversation_id          INT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  sender_id                VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  content                  TEXT NOT NULL,
+  is_read                  BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at               TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  message_type             VARCHAR(50) DEFAULT 'text',
+  attachment_filename      VARCHAR(255),
+  attachment_original_name VARCHAR(255),
+  attachment_mimetype      VARCHAR(100),
+  attachment_size          INT,
+  duration_seconds         INT,
+  call_action              VARCHAR(50)
 );
+
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_type VARCHAR(50) DEFAULT 'text';
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_filename VARCHAR(255);
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_original_name VARCHAR(255);
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_mimetype VARCHAR(100);
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_size INT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS duration_seconds INT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS call_action VARCHAR(50);
 
 -- ============================================================================
 -- PERFORMANCE INDEXES
 -- ============================================================================
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_unique_session ON reviews (session_id);
 CREATE INDEX IF NOT EXISTS idx_skills_lookup ON skills (LOWER(skill_name), type);
 CREATE INDEX IF NOT EXISTS idx_skills_user ON skills (user_id);
 CREATE INDEX IF NOT EXISTS idx_skills_verified ON skills (user_id, is_verified);
@@ -194,11 +208,52 @@ CREATE INDEX IF NOT EXISTS idx_course_requests_requester ON course_requests (req
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications (user_id);
 CREATE INDEX IF NOT EXISTS idx_users_username ON users (LOWER(username));
 CREATE INDEX IF NOT EXISTS idx_users_is_demo ON users (is_demo);
-CREATE INDEX IF NOT EXISTS idx_quiz_attempts_user ON quiz_attempts (user_id);
-CREATE INDEX IF NOT EXISTS idx_quiz_attempts_user_skill ON quiz_attempts (user_id, LOWER(skill_name));
+
 CREATE INDEX IF NOT EXISTS idx_connections_user ON connections (user_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_user1 ON conversations (user1_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_user2 ON conversations (user2_id);
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages (conversation_id, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages (conversation_id, is_read);
+CREATE INDEX IF NOT EXISTS idx_skill_catalog_name ON skill_catalog (LOWER(name));
+
+-- 11. TEACHER DOCUMENT VERIFICATION APPLICATIONS
+CREATE TABLE IF NOT EXISTS teacher_verification_applications (
+  id                    VARCHAR(64) PRIMARY KEY,
+  user_id               VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  skill_name            VARCHAR(100) NOT NULL,
+  status                VARCHAR(50) NOT NULL DEFAULT 'submitted'
+                        CHECK (status IN ('submitted', 'under_review', 'needs_information', 'approved', 'rejected')),
+  submission_type       VARCHAR(50) NOT NULL
+                        CHECK (submission_type IN ('resume_only', 'certificate_only', 'both')),
+  resume_filename       VARCHAR(255),
+  resume_original_name  VARCHAR(255),
+  resume_mimetype       VARCHAR(100),
+  resume_size           INT,
+  certificate_filename  VARCHAR(255),
+  certificate_original_name VARCHAR(255),
+  certificate_mimetype  VARCHAR(100),
+  certificate_size      INT,
+  precheck_results      JSONB DEFAULT '{}'::jsonb,
+  reviewer_id           VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+  reviewer_notes        TEXT,
+  rejection_reason      TEXT,
+  created_at            TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at            TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  reviewed_at           TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX IF NOT EXISTS idx_verif_app_user ON teacher_verification_applications(user_id);
+CREATE INDEX IF NOT EXISTS idx_verif_app_status ON teacher_verification_applications(status);
+CREATE INDEX IF NOT EXISTS idx_verif_app_skill ON teacher_verification_applications(LOWER(skill_name));
+
+-- Additive column migrations for existing deployments
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_reviewer BOOLEAN DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reputation_score NUMERIC(3, 2) DEFAULT 5.00;
+ALTER TABLE session_bookings ADD COLUMN IF NOT EXISTS declined_reason TEXT;
+ALTER TABLE session_bookings ADD COLUMN IF NOT EXISTS conversation_id INT REFERENCES conversations(id) ON DELETE SET NULL;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS session_id VARCHAR(64) REFERENCES session_bookings(id) ON DELETE SET NULL;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS is_closed BOOLEAN DEFAULT FALSE;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP WITH TIME ZONE;
+
+
 

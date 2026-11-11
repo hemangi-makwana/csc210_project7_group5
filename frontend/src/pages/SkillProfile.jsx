@@ -2,33 +2,85 @@
  * ============================================================================
  * Skill Profile Page (src/pages/SkillProfile.jsx)
  * ============================================================================
- * Redesigned with dark blue palette and consistent SVG icons.
  * Allows users to manage:
- * 1. Bio & Professional Summary
- * 2. Teachable Skills with teacher verification quiz workflow
- * 3. Verified teacher badges (strictly from API `is_verified`)
- * 4. Wanted skills for peer learning
- * 5. Learning & Teaching role capabilities
+ * 1. Bio, Professional Summary, and Domain Specialization
+ * 2. Profile Photo Upload (persisted in PostgreSQL & static assets)
+ * 3. Teachable Skills with distinct Verification column (separate from "has skill")
+ * 4. Canonical catalog validation with spelling suggestions (Levenshtein distance)
+ * 5. Learning Goals (wanted skills validated against canonical catalog)
+ * 6. Work Experience and Social Profiles
+ * 7. End-to-end reload confirming PostgreSQL persistence
  */
 
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
-import { getUserProfile, updateSkills, updateUserProfile, uploadAvatar } from '../api/skills.js';
-import { startVerificationQuiz, submitVerificationQuiz } from '../api/quizzes.js';
+import {
+  getUserProfile,
+  updateSkills,
+  updateUserProfile,
+  uploadAvatar,
+  getSkillCatalog,
+} from '../api/skills.js';
 import { Loader, ErrorState, SuccessState } from '../components/Feedback.jsx';
 import {
   UserIcon,
   SkillsIcon,
   VerifiedBadgeIcon,
-  QuizIcon,
   CheckIcon,
   CloseIcon,
   SwitchModeIcon,
 } from '../components/Icons.jsx';
 
+function levenshteinDistance(s1, s2) {
+  const a = (s1 || '').toLowerCase().trim();
+  const b = (s2 || '').toLowerCase().trim();
+  if (a === b) return 0;
+  if (!a) return b.length;
+  if (!b) return a.length;
+
+  const matrix = [];
+  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1
+        );
+      }
+    }
+  }
+  return matrix[b.length][a.length];
+}
+
+function matchCatalogSkill(name, catalog) {
+  const clean = (name || '').trim().toLowerCase();
+  if (!clean || !Array.isArray(catalog) || catalog.length === 0) return { exact: null, suggestion: null };
+
+  const exact = catalog.find(item => item.name.toLowerCase() === clean);
+  if (exact) return { exact: exact.name, suggestion: null };
+
+  let closest = null;
+  let minDistance = 3;
+  for (const item of catalog) {
+    const dist = levenshteinDistance(clean, item.name);
+    if (dist <= 2 && dist < minDistance) {
+      minDistance = dist;
+      closest = item.name;
+    }
+  }
+
+  return { exact: null, suggestion: closest };
+}
+
 export function SkillProfile() {
-  const { user, isAuthenticated, mode, setMode, updateLocalUser } = useAuth();
+  const { user, isAuthenticated, mode, setMode, isTeacher, isLearner, updateLocalUser } = useAuth();
 
   // Profile data states
   const [bio, setBio] = useState('');
@@ -36,6 +88,9 @@ export function SkillProfile() {
   const [specialization, setSpecialization] = useState('');
   const [teachSkills, setTeachSkills] = useState([]);
   const [learnSkills, setLearnSkills] = useState([]);
+
+  // Canonical skill catalog
+  const [skillCatalog, setSkillCatalog] = useState([]);
 
   // Profile photo states
   const [avatarUrl, setAvatarUrl] = useState(null);
@@ -63,64 +118,62 @@ export function SkillProfile() {
   const [newTeachLevel, setNewTeachLevel] = useState('intermediate');
   const [newLearnSkillName, setNewLearnSkillName] = useState('');
 
+  // Catalog typo suggestions
+  const [teachSuggestion, setTeachSuggestion] = useState(null);
+  const [learnSuggestion, setLearnSuggestion] = useState(null);
+
   // UI status states
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState(null);
   const [successMessage, setSuccessMessage] = useState(null);
 
-  // Skill Verification Quiz states
-  const [selectedQuizSkill, setSelectedQuizSkill] = useState(null);
-  const [activeQuiz, setActiveQuiz] = useState(null);
-  const [isQuizLoading, setIsQuizLoading] = useState(false);
-  const [quizUnavailableMessage, setQuizUnavailableMessage] = useState(null);
-  const [quizAnswers, setQuizAnswers] = useState({});
-  const [isSubmittingQuiz, setIsSubmittingQuiz] = useState(false);
-  const [quizResult, setQuizResult] = useState(null);
-  const [quizError, setQuizError] = useState(null);
+  async function loadProfile() {
+    const activeUserId = user ? user.id : 'usr_002';
+    setIsLoading(true);
+    setErrorMessage(null);
+
+    try {
+      const [profileRes, catalogRes] = await Promise.all([
+        getUserProfile(activeUserId),
+        getSkillCatalog().catch(() => ({ catalog: [] })),
+      ]);
+
+      setBio(profileRes.bio || profileRes.profile_summary || '');
+      setUsername(profileRes.username || '');
+      setSpecialization(profileRes.specialization_domain || '');
+      setAvatarUrl(profileRes.avatar_url || null);
+
+      const exp = profileRes.work_experience;
+      setWorkExperience(Array.isArray(exp) ? exp : (exp ? [exp] : []));
+
+      const socials = profileRes.social_profiles;
+      if (socials && typeof socials === 'object') {
+        setSocialProfiles({
+          github: socials.github || '',
+          linkedin: socials.linkedin || '',
+          website: socials.website || '',
+          twitter: socials.twitter || '',
+        });
+      }
+
+      const loadedSkills = profileRes.skills || [];
+      setTeachSkills(loadedSkills.filter((s) => s.type === 'teach'));
+      setLearnSkills(loadedSkills.filter((s) => s.type === 'learn'));
+
+      setSkillCatalog(catalogRes.catalog || []);
+    } catch (error) {
+      setErrorMessage(error.message || 'Failed to load user profile.');
+    } finally {
+      setIsLoading(false);
+    }
+  }
 
   useEffect(() => {
-    async function loadProfile() {
-      const activeUserId = user ? user.id : 'usr_002';
-      setIsLoading(true);
-      setErrorMessage(null);
-
-      try {
-        const response = await getUserProfile(activeUserId);
-        setBio(response.bio || response.profile_summary || '');
-        setUsername(response.username || '');
-        setSpecialization(response.specialization_domain || '');
-        setAvatarUrl(response.avatar_url || null);
-
-        // Load work experience
-        const exp = response.work_experience;
-        setWorkExperience(Array.isArray(exp) ? exp : (exp ? [exp] : []));
-
-        // Load social profiles
-        const socials = response.social_profiles;
-        if (socials && typeof socials === 'object') {
-          setSocialProfiles({
-            github: socials.github || '',
-            linkedin: socials.linkedin || '',
-            website: socials.website || '',
-            twitter: socials.twitter || '',
-          });
-        }
-
-        const loadedSkills = response.skills || [];
-        setTeachSkills(loadedSkills.filter((s) => s.type === 'teach'));
-        setLearnSkills(loadedSkills.filter((s) => s.type === 'learn'));
-      } catch (error) {
-        setErrorMessage(error.message || 'Failed to load user profile.');
-      } finally {
-        setIsLoading(false);
-      }
-    }
-
     loadProfile();
   }, [user]);
 
-  // Hash-based smooth scrolling to targeted profile section (from dashboard checklist)
+  // Hash-based smooth scrolling to targeted profile section
   useEffect(() => {
     if (!isLoading && window.location.hash) {
       const targetId = window.location.hash.substring(1);
@@ -133,87 +186,35 @@ export function SkillProfile() {
     }
   }, [isLoading]);
 
-  /**
-   * Starts teacher verification quiz for a teachable skill.
-   */
-  async function handleSelectTeachableSkill(skillName) {
-    if (!skillName || typeof skillName !== 'string') return;
-    const cleanSkill = skillName.trim();
-    if (!cleanSkill) return;
-
-    setSelectedQuizSkill(cleanSkill);
-    setActiveQuiz(null);
-    setQuizResult(null);
-    setQuizUnavailableMessage(null);
-    setQuizError(null);
-    setQuizAnswers({});
-    setIsQuizLoading(true);
-
-    try {
-      const quizData = await startVerificationQuiz(cleanSkill);
-      setActiveQuiz(quizData);
-    } catch (err) {
-      if (err.data && err.data.available === false) {
-        setQuizUnavailableMessage(
-          err.data.message || `A verification quiz is not available for "${cleanSkill}" yet.`
-        );
-      } else {
-        setQuizError(err.message || `Unable to start quiz for "${cleanSkill}".`);
-      }
-    } finally {
-      setIsQuizLoading(false);
-    }
-  }
-
-  /**
-   * Submits answers to backend for grading.
-   */
-  async function handleSubmitQuiz(event) {
-    if (event) event.preventDefault();
-    if (!activeQuiz) return;
-
-    setIsSubmittingQuiz(true);
-    setQuizError(null);
-
-    try {
-      const response = await submitVerificationQuiz(
-        activeQuiz.quizId,
-        activeQuiz.skillName,
-        quizAnswers
-      );
-
-      setQuizResult(response);
-
-      // If user passed, update local state
-      if (response.passed) {
-        setTeachSkills((prev) =>
-          prev.map((s) =>
-            s.skill_name.toLowerCase() === activeQuiz.skillName.toLowerCase()
-              ? { ...s, is_verified: true, verified_at: new Date().toISOString() }
-              : s
-          )
-        );
-      }
-    } catch (err) {
-      setQuizError(err.message || 'Failed to submit quiz for grading.');
-    } finally {
-      setIsSubmittingQuiz(false);
-    }
-  }
-
   function handleAddTeachSkill(event) {
     event.preventDefault();
+    setTeachSuggestion(null);
+    setErrorMessage(null);
     const cleanName = newTeachSkillName.trim();
     if (!cleanName) return;
 
-    if (teachSkills.some((s) => s.skill_name.toLowerCase() === cleanName.toLowerCase())) {
-      setErrorMessage(`You have already listed "${cleanName}" as a teachable skill.`);
+    // Check catalog validation
+    const match = matchCatalogSkill(cleanName, skillCatalog);
+    if (!match.exact) {
+      if (match.suggestion) {
+        setTeachSuggestion({ input: cleanName, target: match.suggestion });
+        setErrorMessage(`"${cleanName}" is not in the canonical catalog. Did you mean "${match.suggestion}"?`);
+        return;
+      }
+      setErrorMessage(`"${cleanName}" does not exist in our approved skill catalog. Please select an approved skill (e.g. Python, Psychology, Web Design, Docker).`);
+      return;
+    }
+
+    const canonicalName = match.exact;
+
+    if (teachSkills.some((s) => s.skill_name.toLowerCase() === canonicalName.toLowerCase())) {
+      setErrorMessage(`You have already listed "${canonicalName}" as a teachable skill.`);
       return;
     }
 
     const newSkill = {
       id: `temp_${Date.now()}`,
-      skill_name: cleanName,
+      skill_name: canonicalName,
       level: newTeachLevel,
       type: 'teach',
       is_verified: false,
@@ -221,7 +222,14 @@ export function SkillProfile() {
 
     setTeachSkills([...teachSkills, newSkill]);
     setNewTeachSkillName('');
-    setSuccessMessage(`Added "${cleanName}". Click "Save Profile Changes" below to commit to database.`);
+    setSuccessMessage(`Added "${canonicalName}". Click "Save Profile Changes" below to save.`);
+  }
+
+  function handleAcceptTeachSuggestion() {
+    if (!teachSuggestion) return;
+    setNewTeachSkillName(teachSuggestion.target);
+    setTeachSuggestion(null);
+    setErrorMessage(null);
   }
 
   function handleRemoveTeachSkill(skillId) {
@@ -230,24 +238,47 @@ export function SkillProfile() {
 
   function handleAddLearnSkill(event) {
     event.preventDefault();
+    setLearnSuggestion(null);
+    setErrorMessage(null);
     const cleanName = newLearnSkillName.trim();
     if (!cleanName) return;
 
-    if (learnSkills.some((s) => s.skill_name.toLowerCase() === cleanName.toLowerCase())) {
-      setErrorMessage(`You have already listed "${cleanName}" in your wanted skills.`);
+    // Check catalog validation
+    const match = matchCatalogSkill(cleanName, skillCatalog);
+    if (!match.exact) {
+      if (match.suggestion) {
+        setLearnSuggestion({ input: cleanName, target: match.suggestion });
+        setErrorMessage(`"${cleanName}" is not in the canonical catalog. Did you mean "${match.suggestion}"?`);
+        return;
+      }
+      setErrorMessage(`"${cleanName}" does not exist in our approved skill catalog. Please select an approved skill (e.g. Python, Psychology, Machine Learning).`);
+      return;
+    }
+
+    const canonicalName = match.exact;
+
+    if (learnSkills.some((s) => s.skill_name.toLowerCase() === canonicalName.toLowerCase())) {
+      setErrorMessage(`You have already listed "${canonicalName}" in your wanted skills.`);
       return;
     }
 
     const newSkill = {
       id: `temp_${Date.now()}`,
-      skill_name: cleanName,
+      skill_name: canonicalName,
       level: 'beginner',
       type: 'learn',
     };
 
     setLearnSkills([...learnSkills, newSkill]);
     setNewLearnSkillName('');
-    setSuccessMessage(`Added "${cleanName}". Click "Save Profile Changes" below to commit to database.`);
+    setSuccessMessage(`Added "${canonicalName}". Click "Save Profile Changes" below to save.`);
+  }
+
+  function handleAcceptLearnSuggestion() {
+    if (!learnSuggestion) return;
+    setNewLearnSkillName(learnSuggestion.target);
+    setLearnSuggestion(null);
+    setErrorMessage(null);
   }
 
   function handleRemoveLearnSkill(skillId) {
@@ -265,7 +296,7 @@ export function SkillProfile() {
     try {
       const combinedSkills = [...teachSkills, ...learnSkills];
 
-      // Save skills to PostgreSQL
+      // Save skills to PostgreSQL (strictly validated by server against catalog)
       await updateSkills(activeUserId, {
         bio: bio,
         skills: combinedSkills,
@@ -280,19 +311,34 @@ export function SkillProfile() {
           work_experience: workExperience,
           social_profiles: socialProfiles,
         });
-
-        updateLocalUser({
-          bio: bio,
-          profile_summary: bio,
-          specialization_domain: specialization,
-          work_experience: workExperience,
-          social_profiles: socialProfiles,
-        });
       }
 
-      setSuccessMessage('Profile details, skills, experience, and social links saved successfully in PostgreSQL.');
+      // Reload fresh profile data directly from PostgreSQL to confirm persistence
+      const reloadedProfile = await getUserProfile(activeUserId);
+      setBio(reloadedProfile.bio || reloadedProfile.profile_summary || '');
+      setUsername(reloadedProfile.username || '');
+      setSpecialization(reloadedProfile.specialization_domain || '');
+      setAvatarUrl(reloadedProfile.avatar_url || null);
+
+      const exp = reloadedProfile.work_experience;
+      setWorkExperience(Array.isArray(exp) ? exp : (exp ? [exp] : []));
+
+      const loadedSkills = reloadedProfile.skills || [];
+      setTeachSkills(loadedSkills.filter((s) => s.type === 'teach'));
+      setLearnSkills(loadedSkills.filter((s) => s.type === 'learn'));
+
+      updateLocalUser({
+        bio: reloadedProfile.bio || bio,
+        profile_summary: reloadedProfile.profile_summary || bio,
+        specialization_domain: reloadedProfile.specialization_domain || specialization,
+        work_experience: reloadedProfile.work_experience || workExperience,
+        social_profiles: reloadedProfile.social_profiles || socialProfiles,
+        avatar_url: reloadedProfile.avatar_url || avatarUrl,
+      });
+
+      setSuccessMessage('Profile changes, skills, experience, and links saved successfully.');
     } catch (error) {
-      setErrorMessage(error.message || 'Failed to update skills.');
+      setErrorMessage(error.message || 'Failed to update profile.');
     } finally {
       setIsSaving(false);
     }
@@ -335,7 +381,7 @@ export function SkillProfile() {
       setAvatarFile(null);
       setAvatarPreview(null);
       updateLocalUser({ avatar_url: res.avatar_url });
-      setSuccessMessage('Profile photo uploaded and saved to PostgreSQL successfully.');
+      setSuccessMessage('Profile photo uploaded and saved successfully.');
     } catch (err) {
       setErrorMessage(err.message || 'Failed to upload photo.');
     } finally {
@@ -370,7 +416,6 @@ export function SkillProfile() {
     setWorkExperience(workExperience.filter((_, i) => i !== index));
   }
 
-  // Helper to safely format social profile links
   function formatSocialUrl(type, raw) {
     if (!raw) return '#';
     const clean = raw.trim();
@@ -383,11 +428,10 @@ export function SkillProfile() {
 
   return (
     <div className="page" style={{ maxWidth: '920px' }}>
-      {/* Page Header */}
       <div className="page-header">
         <h1 className="page-title">Profile & Skills</h1>
         <p className="page-subtitle">
-          Manage your photo, professional bio, work experience, social links, and teachable skills with verification quizzes.
+          Manage your bio, teachable skills, learning goals, work experience, and profile details.
         </p>
       </div>
 
@@ -404,21 +448,31 @@ export function SkillProfile() {
         <Loader message="Loading your profile data..." />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.75rem' }}>
-          {/* Section 1: Learner / Teacher Mode Switch (No redundant capability checkboxes) */}
+          {/* Section 1: Learner / Teacher Mode Context */}
           <div className="card" id="mode">
-            <h2 className="card-title">Learning & Teaching Mode</h2>
+            <h2 className="card-title">Active Role & Mode</h2>
             <p className="card-subtitle">
-              Switch between Learner Mode and Teacher Mode at any time. You can use both without restriction.
+              Switch between Learner Mode and Teacher Mode at any time.
             </p>
 
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '1rem', backgroundColor: 'var(--color-bg-secondary)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '1rem',
+              backgroundColor: 'var(--color-bg-secondary)',
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--color-border)',
+              flexWrap: 'wrap',
+              gap: '1rem'
+            }}>
               <div>
                 <div style={{ fontWeight: '600', color: 'var(--color-text-primary)' }}>
-                  Active Mode: <span style={{ color: mode === 'teacher' ? '#a78bfa' : '#60a5fa', textTransform: 'capitalize' }}>{mode}</span>
+                  Active Mode: <span style={{ color: mode === 'teacher' ? 'var(--color-teacher)' : 'var(--color-learner)', textTransform: 'capitalize' }}>{mode} Mode</span>
                 </div>
-                <div style={{ fontSize: '0.82rem', color: 'var(--color-text-muted)' }}>
+                <div style={{ fontSize: '0.82rem', color: 'var(--color-text-muted)', marginTop: '0.2rem' }}>
                   {mode === 'teacher'
-                    ? 'Teacher Mode: Managing offered skills, quiz verifications, and student session requests.'
+                    ? 'Teacher Mode: Managing offered skills, teacher qualifications, and incoming learner requests.'
                     : 'Learner Mode: Searching courses, discovering mentors, and tracking your learning goals.'}
                 </div>
               </div>
@@ -434,15 +488,15 @@ export function SkillProfile() {
             </div>
           </div>
 
-          {/* Section 2: Profile Photo Upload (Local storage + PostgreSQL path) */}
+          {/* Section 2: Profile Photo Upload */}
           <div className="card" id="photo">
             <h2 className="card-title">Profile Photo</h2>
             <p className="card-subtitle">
-              Upload a clear JPG, PNG, or WebP photo (up to 5MB). Saved directly to local storage and PostgreSQL.
+              Upload an avatar image (JPG, PNG, or WebP up to 5MB). Synced to header and dashboard welcome greeting.
             </p>
 
             <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
-              <div style={{ position: 'relative' }}>
+              <div>
                 {avatarPreview ? (
                   <img
                     src={avatarPreview}
@@ -451,7 +505,7 @@ export function SkillProfile() {
                   />
                 ) : avatarUrl ? (
                   <img
-                    src={avatarUrl.startsWith('http') ? avatarUrl : avatarUrl}
+                    src={avatarUrl}
                     alt="Profile"
                     style={{ width: '84px', height: '84px', borderRadius: '50%', objectFit: 'cover', border: '3px solid var(--color-border)' }}
                     onError={(e) => { e.target.style.display = 'none'; }}
@@ -515,7 +569,7 @@ export function SkillProfile() {
           <div className="card" id="summary">
             <h2 className="card-title">Professional Summary & Bio</h2>
             <p className="card-subtitle">
-              Brief summary of your background, learning goals, or teaching approach.
+              Brief summary of your background, learning interests, or mentoring philosophy.
             </p>
 
             <div className="form-group">
@@ -526,7 +580,7 @@ export function SkillProfile() {
                 rows="3"
                 value={bio}
                 onChange={(e) => setBio(e.target.value)}
-                placeholder="e.g. Senior CS student experienced in Python algorithms, eager to learn React frontends..."
+                placeholder="Share your technical interests, mentorship focus, or learning goals..."
               />
             </div>
 
@@ -538,12 +592,236 @@ export function SkillProfile() {
                 className="form-input"
                 value={specialization}
                 onChange={(e) => setSpecialization(e.target.value)}
-                placeholder="e.g. Computer Science, Machine Learning, Mathematics, Sports, Photography"
+                placeholder="e.g. Computer Science, Machine Learning, Psychology, Mathematics"
               />
             </div>
           </div>
 
-          {/* Section 4: Work Experience Manager */}
+          {/* Section 4: Skills I Can Teach (with distinct verification column) */}
+          <div className="card" id="teaching">
+            <span id="skills" style={{ display: 'block', position: 'relative', top: '-10px', visibility: 'hidden' }} />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+              <div>
+                <h2 className="card-title" style={{ margin: 0 }}>
+                  Skills I Can Teach
+                </h2>
+                <p className="card-subtitle" style={{ margin: 0, marginTop: '0.2rem' }}>
+                  List subjects you can teach. Verified teacher qualification is tracked independently from skill listing.
+                </p>
+              </div>
+              {isTeacher && (
+                <Link to="/teacher-verification" className="btn btn-sm btn-outline">
+                  Teacher Verification Hub →
+                </Link>
+              )}
+            </div>
+
+            {/* Teachable skills list with separate verification column */}
+            <div style={{ marginBottom: '1.25rem' }}>
+              {teachSkills.length === 0 ? (
+                <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', fontStyle: 'italic', padding: '0.75rem 0' }}>
+                  No teachable skills added yet. Choose an approved skill from the catalog below.
+                </p>
+              ) : (
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.88rem' }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid var(--color-border)', textAlign: 'left', color: 'var(--color-text-muted)' }}>
+                        <th style={{ padding: '0.65rem 0.5rem' }}>Skill Name</th>
+                        <th style={{ padding: '0.65rem 0.5rem' }}>Proficiency Level</th>
+                        <th style={{ padding: '0.65rem 0.5rem' }}>Teacher Verification Status</th>
+                        <th style={{ padding: '0.65rem 0.5rem', textAlign: 'right' }}>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {teachSkills.map((skill) => {
+                        const isVerified = Boolean(skill.is_verified) && !skill.forfeited;
+                        const isForfeited = Boolean(skill.forfeited);
+
+                        return (
+                          <tr key={skill.id || skill.skill_name} style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
+                            <td style={{ padding: '0.65rem 0.5rem', fontWeight: '600', color: 'var(--color-text-primary)' }}>
+                              {skill.skill_name}
+                            </td>
+                            <td style={{ padding: '0.65rem 0.5rem', textTransform: 'capitalize' }}>
+                              {skill.level || 'Intermediate'}
+                            </td>
+                            <td style={{ padding: '0.65rem 0.5rem' }}>
+                              {isVerified ? (
+                                <Link
+                                  to="/teacher-verification"
+                                  className="badge badge-verified"
+                                  title="Verified Teacher: Qualified via document credentials"
+                                  style={{ textDecoration: 'none' }}
+                                >
+                                  <VerifiedBadgeIcon size={12} />
+                                  <span>Verified Teacher</span>
+                                </Link>
+                              ) : isForfeited ? (
+                                <span className="badge" style={{ backgroundColor: 'rgba(239, 68, 68, 0.15)', color: '#f87171' }}>
+                                  Eligibility Forfeited
+                                </span>
+                              ) : isTeacher ? (
+                                <Link
+                                  to="/teacher-verification"
+                                  className="btn btn-sm btn-outline"
+                                  style={{ padding: '0.2rem 0.5rem', fontSize: '0.78rem' }}
+                                >
+                                  Verify Credentials
+                                </Link>
+                              ) : (
+                                <span style={{ color: 'var(--color-text-muted)', fontSize: '0.82rem' }}>
+                                  Not Verified
+                                </span>
+                              )}
+                            </td>
+                            <td style={{ padding: '0.65rem 0.5rem', textAlign: 'right' }}>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveTeachSkill(skill.id)}
+                                className="btn btn-sm btn-outline"
+                                style={{ padding: '0.2rem 0.5rem', fontSize: '0.78rem', color: '#f87171' }}
+                                title={`Remove ${skill.skill_name}`}
+                              >
+                                Remove
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* Typo suggestion banner */}
+            {teachSuggestion && (
+              <div style={{
+                padding: '0.65rem 1rem',
+                backgroundColor: 'rgba(37, 99, 235, 0.12)',
+                border: '1px solid rgba(37, 99, 235, 0.3)',
+                borderRadius: 'var(--radius-sm)',
+                marginBottom: '1rem',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                fontSize: '0.85rem',
+              }}>
+                <span>Did you mean <strong>"{teachSuggestion.target}"</strong>?</span>
+                <button
+                  type="button"
+                  onClick={handleAcceptTeachSuggestion}
+                  className="btn btn-sm btn-primary"
+                  style={{ padding: '0.25rem 0.65rem' }}
+                >
+                  Use "{teachSuggestion.target}"
+                </button>
+              </div>
+            )}
+
+            {/* Add Teachable Skill Form */}
+            <form onSubmit={handleAddTeachSkill} style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+              <input
+                type="text"
+                className="form-input"
+                style={{ flex: 2, minWidth: '180px' }}
+                value={newTeachSkillName}
+                onChange={(e) => {
+                  setNewTeachSkillName(e.target.value);
+                  setTeachSuggestion(null);
+                }}
+                placeholder="Approved skill name (e.g. Python, Psychology, UI Design, Docker)"
+              />
+              <select
+                className="form-select"
+                style={{ flex: 1, minWidth: '140px' }}
+                value={newTeachLevel}
+                onChange={(e) => setNewTeachLevel(e.target.value)}
+              >
+                <option value="beginner">Beginner</option>
+                <option value="intermediate">Intermediate</option>
+                <option value="expert">Expert</option>
+              </select>
+              <button type="submit" className="btn btn-secondary">
+                Add Skill
+              </button>
+            </form>
+          </div>
+
+          {/* Section 5: Skills I Want to Learn (Learning Goals) */}
+          <div className="card" id="learning">
+            <h2 className="card-title">Skills I Want to Learn</h2>
+            <p className="card-subtitle">
+              Add subjects you want to study. The recommendation engine matches you with qualified mentors teaching these topics.
+            </p>
+
+            <div className="chip-container" style={{ marginBottom: '1.25rem', minHeight: '40px' }}>
+              {learnSkills.length > 0 ? (
+                learnSkills.map((skill) => (
+                  <span key={skill.id} className="chip">
+                    <span>{skill.skill_name}</span>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveLearnSkill(skill.id)}
+                      className="chip-remove"
+                      title={`Remove ${skill.skill_name}`}
+                    >
+                      <CloseIcon size={14} />
+                    </button>
+                  </span>
+                ))
+              ) : (
+                <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
+                  No learning goals added yet. Add an approved skill from the catalog below.
+                </span>
+              )}
+            </div>
+
+            {/* Typo suggestion banner */}
+            {learnSuggestion && (
+              <div style={{
+                padding: '0.65rem 1rem',
+                backgroundColor: 'rgba(37, 99, 235, 0.12)',
+                border: '1px solid rgba(37, 99, 235, 0.3)',
+                borderRadius: 'var(--radius-sm)',
+                marginBottom: '1rem',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                fontSize: '0.85rem',
+              }}>
+                <span>Did you mean <strong>"{learnSuggestion.target}"</strong>?</span>
+                <button
+                  type="button"
+                  onClick={handleAcceptLearnSuggestion}
+                  className="btn btn-sm btn-primary"
+                  style={{ padding: '0.25rem 0.65rem' }}
+                >
+                  Use "{learnSuggestion.target}"
+                </button>
+              </div>
+            )}
+
+            <form onSubmit={handleAddLearnSkill} style={{ display: 'flex', gap: '0.75rem' }}>
+              <input
+                type="text"
+                className="form-input"
+                style={{ flex: 1 }}
+                value={newLearnSkillName}
+                onChange={(e) => {
+                  setNewLearnSkillName(e.target.value);
+                  setLearnSuggestion(null);
+                }}
+                placeholder="Topic or skill (e.g. Psychology, Machine Learning, React)"
+              />
+              <button type="submit" className="btn btn-secondary">
+                Add Goal
+              </button>
+            </form>
+          </div>
+
+          {/* Section 6: Work Experience Manager */}
           <div className="card" id="experience">
             <h2 className="card-title">Work & Educational Experience</h2>
             <p className="card-subtitle">
@@ -600,7 +878,6 @@ export function SkillProfile() {
               </p>
             )}
 
-            {/* Add Experience Form */}
             <form onSubmit={handleAddExperience} style={{ padding: '1rem', backgroundColor: 'var(--color-bg)', borderRadius: 'var(--radius-sm)', border: '1px dashed var(--color-border)' }}>
               <div style={{ fontWeight: '600', fontSize: '0.88rem', marginBottom: '0.75rem', color: 'var(--color-text-primary)' }}>
                 Add New Experience Entry
@@ -616,7 +893,7 @@ export function SkillProfile() {
                 <input
                   type="text"
                   className="form-input"
-                  placeholder="Organization / Company (e.g. Tech Lab)"
+                  placeholder="Organization / Company (e.g. University Lab)"
                   value={newExpCompany}
                   onChange={(e) => setNewExpCompany(e.target.value)}
                 />
@@ -644,11 +921,11 @@ export function SkillProfile() {
             </form>
           </div>
 
-          {/* Section 5: Social Profiles Form & Safe External Links */}
+          {/* Section 7: Social Profiles & Links */}
           <div className="card" id="socials">
             <h2 className="card-title">Social Profiles & Links</h2>
             <p className="card-subtitle">
-              Connect your verified external profiles. Links open safely in a new tab without exposing window context.
+              Connect external verified profiles. Links open safely in a new tab without window context exposure.
             </p>
 
             <div className="grid grid-cols-2" style={{ gap: '1rem', marginBottom: '1.25rem' }}>
@@ -701,7 +978,6 @@ export function SkillProfile() {
               </div>
             </div>
 
-            {/* Live Safe External Previews */}
             <div style={{ paddingTop: '0.85rem', borderTop: '1px solid var(--color-border)', display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
               <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', fontWeight: '600' }}>
                 Preview Links:
@@ -746,418 +1022,10 @@ export function SkillProfile() {
                   Twitter / X ↗
                 </a>
               )}
-              {!socialProfiles.github && !socialProfiles.linkedin && !socialProfiles.website && !socialProfiles.twitter && (
-                <span style={{ fontSize: '0.82rem', color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
-                  No social profiles entered yet.
-                </span>
-              )}
             </div>
           </div>
 
-          {/* Section 6: Skills I Can Teach & Verification Quizzes */}
-          <div className="card" id="teaching">
-            <span id="skills" style={{ display: 'block', position: 'relative', top: '-10px', visibility: 'hidden' }} />
-            <span id="verified" style={{ display: 'block', position: 'relative', top: '-10px', visibility: 'hidden' }} />
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-              <h2 className="card-title" style={{ margin: 0 }}>
-                Skills I Can Teach & Verified Badges
-              </h2>
-              <span className="badge badge-volunteer">Mentoring</span>
-            </div>
-            <p className="card-subtitle">
-              Add topics you are confident explaining. Click any teachable skill to start its 10-question verification quiz.
-            </p>
-
-            {/* Teachable skills chip list */}
-            <div className="chip-container" style={{ marginBottom: '1.25rem', minHeight: '40px' }}>
-              {teachSkills.length > 0 ? (
-                teachSkills.map((skill) => {
-                  const isSelected = selectedQuizSkill && selectedQuizSkill.toLowerCase() === skill.skill_name.toLowerCase();
-                  // STRICT: Only show badge when API says is_verified === true
-                  const isVerified = Boolean(skill.is_verified);
-
-                  return (
-                    <span
-                      key={skill.id}
-                      className="chip"
-                      style={{
-                        cursor: 'pointer',
-                        borderColor: isSelected ? 'var(--color-primary)' : 'var(--color-border)',
-                        backgroundColor: isSelected ? 'rgba(79, 70, 229, 0.2)' : 'var(--color-bg-secondary)',
-                      }}
-                      onClick={() => handleSelectTeachableSkill(skill.skill_name)}
-                      title={`Click to start or review verification quiz for ${skill.skill_name}`}
-                    >
-                      <span style={{ fontWeight: isSelected ? '700' : '500' }}>{skill.skill_name}</span>
-                      <span className="chip-level">{skill.level}</span>
-                      {isVerified ? (
-                        <span className="badge badge-verified" title="Verified Teacher: Qualified via skill quiz">
-                          <VerifiedBadgeIcon size={12} />
-                          <span>Verified</span>
-                        </span>
-                      ) : (
-                        <span
-                          className="badge"
-                          style={{
-                            backgroundColor: 'rgba(59, 130, 246, 0.15)',
-                            color: '#60a5fa',
-                            fontSize: '0.72rem',
-                          }}
-                        >
-                          Take Quiz
-                        </span>
-                      )}
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleRemoveTeachSkill(skill.id);
-                        }}
-                        className="chip-remove"
-                        title={`Remove ${skill.skill_name}`}
-                      >
-                        <CloseIcon size={14} />
-                      </button>
-                    </span>
-                  );
-                })
-              ) : (
-                <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
-                  No teachable skills listed yet. Add one below.
-                </span>
-              )}
-            </div>
-
-            {/* Add Teachable Skill Form */}
-            <form onSubmit={handleAddTeachSkill} style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-              <input
-                type="text"
-                className="form-input"
-                style={{ flex: 2, minWidth: '180px' }}
-                value={newTeachSkillName}
-                onChange={(e) => setNewTeachSkillName(e.target.value)}
-                placeholder="Skill name (e.g. Python, Graphs, CSS)"
-              />
-              <select
-                className="form-select"
-                style={{ flex: 1, minWidth: '140px' }}
-                value={newTeachLevel}
-                onChange={(e) => setNewTeachLevel(e.target.value)}
-              >
-                <option value="beginner">Beginner</option>
-                <option value="intermediate">Intermediate</option>
-                <option value="expert">Expert</option>
-              </select>
-              <button type="submit" className="btn btn-secondary">
-                Add Skill
-              </button>
-            </form>
-          </div>
-
-          {/* Teacher Verification Quiz Interactive Container */}
-          {isQuizLoading && (
-            <div className="card" style={{ borderLeft: '4px solid var(--color-primary)' }}>
-              <Loader message={`Starting 10-question verification quiz for "${selectedQuizSkill}"...`} />
-            </div>
-          )}
-
-          {quizUnavailableMessage && !isQuizLoading && (
-            <div className="card" style={{ borderLeft: '4px solid var(--color-warning)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                <div>
-                  <h3 style={{ fontSize: '1.05rem', fontWeight: '700', color: '#fbbf24', marginBottom: '0.25rem' }}>
-                    Verification Quiz Not Available
-                  </h3>
-                  <p style={{ fontSize: '0.9rem', color: 'var(--color-text-secondary)', lineHeight: 1.5 }}>
-                    {quizUnavailableMessage}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setQuizUnavailableMessage(null)}
-                  className="btn btn-sm btn-outline"
-                >
-                  <CloseIcon size={16} />
-                </button>
-              </div>
-            </div>
-          )}
-
-          {quizError && !isQuizLoading && (
-            <div className="card" style={{ borderLeft: '4px solid var(--color-danger)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                <div>
-                  <h3 style={{ fontSize: '1rem', fontWeight: '700', color: '#f87171', marginBottom: '0.25rem' }}>
-                    Quiz Notice
-                  </h3>
-                  <p style={{ fontSize: '0.9rem', color: 'var(--color-text-secondary)' }}>{quizError}</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setQuizError(null)}
-                  className="btn btn-sm btn-outline"
-                >
-                  <CloseIcon size={16} />
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* ACTIVE QUIZ QUESTIONS DISPLAY */}
-          {activeQuiz && !quizResult && !isQuizLoading && (
-            <div className="card" style={{ border: '2px solid var(--color-primary)', backgroundColor: 'var(--color-surface-elevated)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
-                <div>
-                  <h2 className="card-title" style={{ margin: 0, color: '#818cf8', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <QuizIcon size={20} />
-                    <span>Teacher Verification Quiz: {activeQuiz.skillName}</span>
-                  </h2>
-                  <p className="card-subtitle" style={{ marginTop: '0.35rem', marginBottom: 0 }}>
-                    Answer 10 domain-specific questions. A score of <strong>5/10 (50%) or higher</strong> qualifies you as a verified teacher. Answer keys remain server-side.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setActiveQuiz(null)}
-                  className="btn btn-sm btn-outline"
-                >
-                  Cancel Quiz
-                </button>
-              </div>
-
-              <form onSubmit={handleSubmitQuiz} style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-                {activeQuiz.questions.map((q, idx) => (
-                  <div
-                    key={q.id}
-                    style={{
-                      padding: '1.25rem',
-                      border: '1px solid var(--color-border)',
-                      borderRadius: 'var(--radius-md)',
-                      backgroundColor: 'var(--color-bg-secondary)',
-                    }}
-                  >
-                    <div style={{ fontWeight: '600', fontSize: '0.95rem', marginBottom: '0.85rem', color: 'var(--color-text-primary)' }}>
-                      Question {idx + 1} of 10: {q.question}
-                    </div>
-
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                      {q.options.map((option, optIdx) => {
-                        const isChecked = quizAnswers[q.id] === option;
-                        return (
-                          <label
-                            key={optIdx}
-                            style={{
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: '0.75rem',
-                              padding: '0.65rem 0.9rem',
-                              borderRadius: 'var(--radius-sm)',
-                              cursor: 'pointer',
-                              border: isChecked ? '1px solid var(--color-primary)' : '1px solid var(--color-border)',
-                              backgroundColor: isChecked ? 'rgba(79, 70, 229, 0.15)' : 'var(--color-surface)',
-                              fontSize: '0.9rem',
-                              color: isChecked ? '#ffffff' : 'var(--color-text-secondary)',
-                              transition: 'all 0.15s ease',
-                            }}
-                          >
-                            <input
-                              type="radio"
-                              name={`question_${q.id}`}
-                              value={option}
-                              checked={isChecked}
-                              onChange={() => setQuizAnswers((prev) => ({ ...prev, [q.id]: option }))}
-                              style={{ cursor: 'pointer' }}
-                            />
-                            <span>{option}</span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
-
-                <div style={{ display: 'flex', gap: '1rem', marginTop: '0.5rem' }}>
-                  <button
-                    type="submit"
-                    className="btn btn-primary btn-lg"
-                    style={{ flex: 1 }}
-                    disabled={isSubmittingQuiz}
-                  >
-                    {isSubmittingQuiz ? 'Grading on Server...' : 'Submit Quiz for Verification'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setActiveQuiz(null)}
-                    className="btn btn-secondary"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </form>
-            </div>
-          )}
-
-          {/* QUIZ RESULT & EXPLANATIONS */}
-          {quizResult && (
-            <div
-              className="card"
-              style={{
-                border: quizResult.passed ? '2px solid var(--color-success)' : '2px solid var(--color-warning)',
-                backgroundColor: 'var(--color-surface-elevated)',
-              }}
-            >
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.25rem' }}>
-                <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.35rem' }}>
-                    <h2 style={{ fontSize: '1.3rem', fontWeight: '800', margin: 0, color: quizResult.passed ? '#34d399' : '#fbbf24' }}>
-                      {quizResult.passed ? 'Teacher Verification Passed' : 'Verification Attempt Result'}
-                    </h2>
-                    <span
-                      className="badge"
-                      style={{
-                        backgroundColor: quizResult.passed ? 'rgba(16, 185, 129, 0.2)' : 'rgba(245, 158, 11, 0.2)',
-                        color: quizResult.passed ? '#34d399' : '#fbbf24',
-                        border: quizResult.passed ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(245, 158, 11, 0.4)',
-                        fontSize: '0.85rem',
-                        fontWeight: '700',
-                        padding: '0.25rem 0.65rem',
-                      }}
-                    >
-                      Score: {quizResult.score}/10 ({quizResult.percentage}%)
-                    </span>
-                  </div>
-                  <p style={{ fontSize: '0.95rem', color: 'var(--color-text-secondary)', margin: 0, lineHeight: 1.5 }}>
-                    {quizResult.message}
-                  </p>
-                </div>
-
-                <div style={{ display: 'flex', gap: '0.5rem' }}>
-                  {!quizResult.passed && (
-                    <button
-                      type="button"
-                      onClick={() => handleSelectTeachableSkill(quizResult.skillName)}
-                      className="btn btn-primary btn-sm"
-                    >
-                      Retake Quiz
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setQuizResult(null);
-                      setActiveQuiz(null);
-                    }}
-                    className="btn btn-secondary btn-sm"
-                  >
-                    Close Review
-                  </button>
-                </div>
-              </div>
-
-              {/* Question review */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
-                <h3 style={{ fontSize: '0.95rem', fontWeight: '700', color: 'var(--color-text-primary)' }}>
-                  Detailed Question Review & Explanations:
-                </h3>
-                {quizResult.results && quizResult.results.map((res, idx) => (
-                  <div
-                    key={res.questionId || idx}
-                    style={{
-                      padding: '0.85rem 1rem',
-                      backgroundColor: 'var(--color-bg-secondary)',
-                      borderRadius: 'var(--radius-sm)',
-                      border: res.isCorrect ? '1px solid rgba(16, 185, 129, 0.3)' : '1px solid rgba(239, 68, 68, 0.3)',
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.35rem' }}>
-                      <span style={{ fontWeight: '600', fontSize: '0.9rem', color: 'var(--color-text-primary)' }}>
-                        {idx + 1}. {res.question}
-                      </span>
-                      <span
-                        style={{
-                          fontSize: '0.78rem',
-                          fontWeight: '700',
-                          padding: '0.15rem 0.5rem',
-                          borderRadius: '4px',
-                          backgroundColor: res.isCorrect ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
-                          color: res.isCorrect ? '#34d399' : '#f87171',
-                          flexShrink: 0,
-                          marginLeft: '0.5rem',
-                        }}
-                      >
-                        {res.isCorrect ? 'Correct' : 'Incorrect'}
-                      </span>
-                    </div>
-
-                    <div style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)', marginBottom: '0.25rem' }}>
-                      <strong>Your answer:</strong>{' '}
-                      <span style={{ color: res.isCorrect ? '#34d399' : '#f87171' }}>
-                        {res.chosenAnswer}
-                      </span>
-                    </div>
-
-                    {!res.isCorrect && (
-                      <div style={{ fontSize: '0.85rem', color: '#34d399', marginBottom: '0.25rem' }}>
-                        <strong>Correct answer:</strong> {res.correctAnswer}
-                      </div>
-                    )}
-
-                    {res.explanation && (
-                      <div style={{ fontSize: '0.82rem', color: 'var(--color-text-muted)', marginTop: '0.25rem', lineHeight: 1.4 }}>
-                        {res.explanation}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Section 7: Skills I Want to Learn */}
-          <div className="card" id="learning">
-            <h2 className="card-title">Skills I Want to Learn</h2>
-            <p className="card-subtitle">
-              Add topics you wish to study. The recommendation engine matches you with qualified peer mentors.
-            </p>
-
-            <div className="chip-container" style={{ marginBottom: '1.25rem', minHeight: '40px' }}>
-              {learnSkills.length > 0 ? (
-                learnSkills.map((skill) => (
-                  <span key={skill.id} className="chip">
-                    <span>{skill.skill_name}</span>
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveLearnSkill(skill.id)}
-                      className="chip-remove"
-                      title={`Remove ${skill.skill_name}`}
-                    >
-                      <CloseIcon size={14} />
-                    </button>
-                  </span>
-                ))
-              ) : (
-                <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
-                  No learning goals listed yet. Add one below.
-                </span>
-              )}
-            </div>
-
-            <form onSubmit={handleAddLearnSkill} style={{ display: 'flex', gap: '0.75rem' }}>
-              <input
-                type="text"
-                className="form-input"
-                style={{ flex: 1 }}
-                value={newLearnSkillName}
-                onChange={(e) => setNewLearnSkillName(e.target.value)}
-                placeholder="Topic or skill (e.g. Machine Learning, React, UI/UX)"
-              />
-              <button type="submit" className="btn btn-secondary">
-                Add Goal
-              </button>
-            </form>
-          </div>
-
-          {/* Section 5: Save Profile Button */}
+          {/* Save Profile Button */}
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', marginBottom: '3rem' }}>
             <button
               type="button"
@@ -1165,7 +1033,7 @@ export function SkillProfile() {
               className="btn btn-primary btn-lg"
               disabled={isSaving}
             >
-              {isSaving ? 'Saving to Database...' : 'Save Profile Changes'}
+              {isSaving ? 'Saving Changes...' : 'Save Profile Changes'}
             </button>
           </div>
         </div>
@@ -1173,3 +1041,5 @@ export function SkillProfile() {
     </div>
   );
 }
+
+export default SkillProfile;

@@ -238,15 +238,22 @@ function handleMockFallback(endpoint, options = {}) {
 export async function request(endpoint, options = {}) {
   // Construct standard HTTP headers
   const headers = {
-    'Content-Type': 'application/json',
     ...(options.headers || {}),
   };
+
+  if (!(options.body instanceof FormData)) {
+    headers['Content-Type'] = headers['Content-Type'] || 'application/json';
+  }
 
   // Attach JWT Bearer token if user is logged in
   const token = localStorage.getItem('token');
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
+
+  // Attach active interaction mode (learner | teacher)
+  const activeMode = localStorage.getItem('skillexchange_mode') || 'learner';
+  headers['x-active-mode'] = activeMode;
 
   const config = {
     ...options,
@@ -267,6 +274,18 @@ export async function request(endpoint, options = {}) {
       const error = new Error(errorData.message || errorData.error || `Request failed with status ${response.status}`);
       error.status = response.status;
       error.data = errorData;
+
+      // Handle invalid or expired session tokens on protected endpoints
+      if (response.status === 401 && !isAuthEndpoint) {
+        localStorage.removeItem('token');
+        localStorage.removeItem('user_data');
+        window.dispatchEvent(
+          new CustomEvent('auth:unauthorized', {
+            detail: { message: error.message || 'Session expired. Please log in again.' },
+          })
+        );
+      }
+
       throw error;
     }
 

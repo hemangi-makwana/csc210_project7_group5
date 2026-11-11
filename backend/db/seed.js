@@ -14,6 +14,7 @@
  * ============================================================================
  */
 
+const bcrypt = require("bcryptjs");
 const { pool, checkConnection } = require("./index");
 
 const seedUsersData = [
@@ -272,6 +273,7 @@ const seedUsersData = [
     },
     skills: [
       { skillName: "Cognitive Psychology", level: "expert", type: "teach", verified: true, score: 10 },
+      { skillName: "Psychology", level: "expert", type: "teach", verified: true, score: 10 },
       { skillName: "Machine Learning", level: "intermediate", type: "learn" },
     ],
   },
@@ -387,8 +389,53 @@ const seedUsersData = [
   },
 ];
 
+const seedSkillCatalog = [
+  // Technology & Computer Science
+  { name: "Python", category: "Programming & Software", description: "General-purpose programming language emphasizing code readability and broad ecosystem for web, backend, and data science." },
+  { name: "Node.js", category: "Programming & Software", description: "Asynchronous event-driven JavaScript runtime designed to build scalable network backends." },
+  { name: "Data Structures", category: "Programming & Software", description: "Essential data arrangements including arrays, lists, trees, graphs, heaps, and hash tables." },
+  { name: "Algorithms", category: "Programming & Software", description: "Algorithmic strategies including sorting, graph traversal, greedy methods, and dynamic programming." },
+  { name: "Software Engineering", category: "Programming & Software", description: "Software lifecycle practices, clean code, modular architecture, and automated testing." },
+  { name: "Docker", category: "Cloud & DevOps", description: "Container engine for packaging software applications with reproducible dependencies." },
+
+  // Design & Frontend
+  { name: "Web Design", category: "UI/UX & Design", description: "Responsive layouts, semantic markup, visual hierarchy, and modern CSS techniques." },
+  { name: "UI Design", category: "UI/UX & Design", description: "Interface aesthetics, typography, accessibility contrast, and design system tokens." },
+
+  // AI & Data Science
+  { name: "Machine Learning", category: "Data Science & AI", description: "Supervised and unsupervised statistical learning models, regression, and classification." },
+  { name: "Deep Learning", category: "Data Science & AI", description: "Deep neural networks, activation functions, backpropagation, and CNN/transformer architectures." },
+  { name: "Excel", category: "Productivity & Analytics", description: "Spreadsheet modeling, analytical pivot tables, nested formulas, and data analysis." },
+
+  // Mathematics
+  { name: "Linear Algebra", category: "Academics & Mathematics", description: "Vector spaces, linear maps, matrix rank, eigenvalues, eigenvectors, and singular value decomposition." },
+  { name: "Calculus", category: "Academics & Mathematics", description: "Differential and integral calculus, limits, derivatives, Taylor series, and optimization." },
+  { name: "Statistics", category: "Academics & Mathematics", description: "Probability, inferential statistics, confidence intervals, and hypothesis testing." },
+
+  // Psychology & Social Sciences
+  { name: "Psychology", category: "Social Sciences & Psychology", description: "Scientific study of human mental processes, behavioral dynamics, and personality development." },
+  { name: "Cognitive Psychology", category: "Social Sciences & Psychology", description: "Human working memory, heuristics, perception, cognitive dissonance, and decision-making." },
+  { name: "Economics", category: "Social Sciences & Psychology", description: "Microeconomic pricing, macroeconomic policy, trade balances, and market equilibrium." },
+  { name: "Sociology", category: "Social Sciences & Psychology", description: "Social institutions, cultural stratification, interpersonal norms, and societal behavior." },
+
+  // Sports & Athletics
+  { name: "Basketball", category: "Sports & Athletics", description: "Shooting mechanics, defensive zone discipline, pick-and-roll tactical execution, and footwork." },
+  { name: "Tennis", category: "Sports & Athletics", description: "Stroke biomechanics, Continental grip mechanics, topspin generation, and court strategy." },
+  { name: "Chess", category: "Sports & Athletics", description: "Positional piece play, tactical combinations, opening theory, and endgame pawn structures." },
+
+  // Arts & Creative
+  { name: "Photography", category: "Arts & Creative", description: "Aperture, shutter speed, ISO exposure triangle, natural lighting, and photographic composition." },
+  { name: "Guitar", category: "Arts & Creative", description: "Acoustic fingerstyle, chord transitions, fretboard harmony, rhythm, and acoustic technique." },
+  { name: "Cooking", category: "Arts & Creative", description: "Culinary chemistry, knife skills, food preparation, flavor balancing, and plant-based nutrition." },
+
+  // Languages & Communication
+  { name: "Spanish", category: "Languages & Communication", description: "Grammar, conjugation, vocabulary, and conversational fluency in Spanish." },
+  { name: "Public Speaking", category: "Languages & Communication", description: "Rhetorical structure, vocal projection, stage presence, and engaging presentation delivery." },
+  { name: "Public Relations", category: "Languages & Communication", description: "Strategic communication process that builds mutually beneficial relationships between organizations and their publics." },
+];
+
 /**
- * Idempotently seeds local PostgreSQL with demo mentors.
+ * Idempotently seeds local PostgreSQL with demo mentors and canonical catalog.
  * Preserves all existing real user data, logins, and bookings.
  */
 async function seedPostgres(closePool = false) {
@@ -398,9 +445,32 @@ async function seedPostgres(closePool = false) {
     return false;
   }
 
-  console.log("[Seed] Checking and synchronizing demo mentors in local PostgreSQL...");
+  console.log("[Seed] Checking and synchronizing canonical catalog and demo mentors in local PostgreSQL...");
 
   try {
+    // 0. Remove misleading test identities while never altering real accounts
+    await pool.query(
+      `DELETE FROM users
+       WHERE name IN ('Quiz Test Teacher', 'Test User', 'Mode Test User')
+          OR email IN ('test.user@example.com')
+          OR email LIKE 'teacher_%@example.com'
+          OR email LIKE 'mode_test_%@example.com'`
+    );
+
+    // 1. Seed canonical skill catalog
+    for (const sc of seedSkillCatalog) {
+      await pool.query(
+        `INSERT INTO skill_catalog (name, category, description)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (name) DO UPDATE SET
+           category = EXCLUDED.category,
+           description = EXCLUDED.description`,
+        [sc.name, sc.category, sc.description]
+      );
+    }
+
+    const demoPasswordHash = await bcrypt.hash("password123", 10);
+
     for (const u of seedUsersData) {
       const email = `${u.userId}@skillexchange.demo`;
       const username = u.name.toLowerCase().replace(/[^a-z0-9]/g, "_") + "_demo";
@@ -408,13 +478,14 @@ async function seedPostgres(closePool = false) {
       // 1. Insert or update demo user (never touches real non-demo users)
       await pool.query(
         `INSERT INTO users (
-           id, name, email, role, bio, profile_summary, specialization_domain,
+           id, name, email, password_hash, role, bio, profile_summary, specialization_domain,
            work_experience, social_profiles, reputation_score, username, is_demo
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, TRUE)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, TRUE)
          ON CONFLICT (id) DO UPDATE SET
            name = EXCLUDED.name,
            bio = EXCLUDED.bio,
+           password_hash = EXCLUDED.password_hash,
            profile_summary = EXCLUDED.profile_summary,
            specialization_domain = EXCLUDED.specialization_domain,
            work_experience = EXCLUDED.work_experience,
@@ -425,6 +496,7 @@ async function seedPostgres(closePool = false) {
           u.userId,
           u.name,
           email,
+          demoPasswordHash,
           u.role,
           u.bio,
           u.bio,

@@ -10,13 +10,14 @@ import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { BRAND } from '../constants/brand.js';
-import brandLogo from '../assets/logo.png';
+import logoLight from '../assets/logo-light.png';
+import logoDark from '../assets/logo-dark.png';
 import { ErrorState } from '../components/Feedback.jsx';
 import { EyeIcon, EyeOffIcon } from '../components/Icons.jsx';
 
 export function Register() {
   const navigate = useNavigate();
-  const { register } = useAuth();
+  const { register, isTeacher, isDarkMode } = useAuth();
 
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -67,7 +68,7 @@ export function Register() {
       <section className="auth-hero-banner" style={{ padding: '2.5rem 1.5rem 2rem' }}>
         <div className="auth-hero-logo-wrapper">
           <img
-            src={brandLogo}
+            src={isDarkMode ? logoDark : logoLight}
             alt="Skill Exchange"
             className="auth-hero-logo"
           />

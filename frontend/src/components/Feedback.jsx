@@ -63,7 +63,7 @@ export function ErrorState({ message = 'An unexpected error occurred.', onRetry 
         <button 
           onClick={onRetry} 
           className="btn btn-sm btn-outline" 
-          style={{ marginLeft: 'auto', borderColor: 'rgba(239, 68, 68, 0.4)', color: '#fca5a5' }}
+          style={{ marginLeft: 'auto', borderColor: 'rgba(239, 68, 68, 0.4)', color: 'var(--color-danger)' }}
         >
           Try Again
         </button>

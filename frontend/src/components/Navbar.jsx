@@ -13,10 +13,11 @@
 import React from 'react';
 import { Link, NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
-import brandLogo from '../assets/logo.png';
+import logoLight from '../assets/logo-light.png';
+import logoDark from '../assets/logo-dark.png';
 
 export function Navbar() {
-  const { user, logout, isAuthenticated } = useAuth();
+  const { user, logout, isAuthenticated, isTeacher, isDarkMode } = useAuth();
   const navigate = useNavigate();
 
   /**
@@ -32,7 +33,11 @@ export function Navbar() {
       <div className="navbar-container">
         {/* Brand Logo */}
         <Link to="/" className="navbar-brand" aria-label="Skill Exchange Home">
-          <img src={brandLogo} alt="Skill Exchange" className="navbar-brand-logo" />
+          <img
+            src={isDarkMode ? logoDark : logoLight}
+            alt="Skill Exchange"
+            className="navbar-brand-logo"
+          />
         </Link>
 
         {/* Navigation Links */}

@@ -2,13 +2,20 @@
  * ============================================================================
  * SearchBar Component (src/components/SearchBar.jsx)
  * ============================================================================
- * Search input field with submit and clear buttons without decorative emojis.
+ * Substantial, comfortable search composer inspired by modern composer proportions
+ * (~58px height, rounded pill shape, inner vertically-centered icon, generous padding).
+ * Aligns on a single clean row with the action button on desktop, wraps responsively.
+ * Full contrast support for both Light Mode and Dark Mode.
  */
 
 import React, { useState } from 'react';
 import { SearchIcon, CloseIcon } from './Icons.jsx';
 
-export function SearchBar({ initialValue = '', onSearch, placeholder = 'Search by skill (e.g. Python, React, Data Structures)...' }) {
+export function SearchBar({
+  initialValue = '',
+  onSearch,
+  placeholder = 'Search by skill name (e.g. Python, React, Machine Learning, Data Structures)...',
+}) {
   const [searchTerm, setSearchTerm] = useState(initialValue);
 
   function handleSubmit(event) {
@@ -26,43 +33,46 @@ export function SearchBar({ initialValue = '', onSearch, placeholder = 'Search b
   }
 
   return (
-    <form onSubmit={handleSubmit} style={{ display: 'flex', gap: '0.75rem', width: '100%' }}>
-      <div style={{ position: 'relative', flex: 1 }}>
+    <form onSubmit={handleSubmit} className="search-composer-form">
+      <div className="search-composer-wrapper">
+        {/* Left Search Icon inside field, centered vertically with typed text */}
+        <span className="search-composer-icon">
+          <SearchIcon size={20} />
+        </span>
+
+        {/* Substantial, comfortable composer input */}
         <input
           type="text"
-          className="form-input"
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
           placeholder={placeholder}
-          style={{ paddingRight: searchTerm ? '2.5rem' : '1rem' }}
+          className="search-composer-input"
+          aria-label="Search mentors by skill"
         />
+
+        {/* Clear Button */}
         {searchTerm && (
           <button
             type="button"
             onClick={handleClear}
-            style={{
-              position: 'absolute',
-              right: '0.75rem',
-              top: '50%',
-              transform: 'translateY(-50%)',
-              background: 'none',
-              border: 'none',
-              color: 'var(--color-text-muted)',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-            }}
-            title="Clear search"
+            className="search-composer-clear"
+            title="Clear search input"
+            aria-label="Clear search input"
           >
-            <CloseIcon size={16} />
+            <CloseIcon size={18} />
           </button>
         )}
       </div>
 
-      <button type="submit" className="btn btn-primary" style={{ gap: '0.5rem' }}>
-        <SearchIcon size={18} />
-        <span>Search</span>
+      <button
+        type="submit"
+        className="btn btn-primary search-composer-btn"
+      >
+        <SearchIcon size={19} />
+        <span>Find Mentors</span>
       </button>
     </form>
   );
 }
+
+export default SearchBar;

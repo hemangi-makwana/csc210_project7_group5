@@ -173,6 +173,47 @@ class HashTable {
     // If we searched the bucket and didn't find the skill, return an empty array
     return [];
   }
+
+  /**
+   * General key-value setter.
+   */
+  set(key, value) {
+    if (!key || typeof key !== "string") return;
+    const normalizedKey = key.trim().toLowerCase();
+    const targetBucketIndex = this.hash(normalizedKey);
+    const bucket = this.buckets[targetBucketIndex];
+
+    for (let i = 0; i < bucket.length; i++) {
+      if (bucket[i].key === normalizedKey || bucket[i].skillName === normalizedKey) {
+        bucket[i].value = value;
+        bucket[i].users = Array.isArray(value) ? value : [value];
+        return;
+      }
+    }
+    bucket.push({
+      key: normalizedKey,
+      skillName: normalizedKey,
+      value,
+      users: Array.isArray(value) ? value : [value],
+    });
+  }
+
+  /**
+   * General key-value getter.
+   */
+  get(key) {
+    if (!key || typeof key !== "string") return null;
+    const normalizedKey = key.trim().toLowerCase();
+    const targetBucketIndex = this.hash(normalizedKey);
+    const bucket = this.buckets[targetBucketIndex];
+
+    for (let i = 0; i < bucket.length; i++) {
+      if (bucket[i].key === normalizedKey || bucket[i].skillName === normalizedKey) {
+        return bucket[i].value !== undefined ? bucket[i].value : bucket[i].users;
+      }
+    }
+    return null;
+  }
 }
 
 module.exports = HashTable;

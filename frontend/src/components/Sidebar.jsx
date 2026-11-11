@@ -10,7 +10,8 @@ import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { BRAND } from '../constants/brand.js';
-import brandLogo from '../assets/logo.png';
+import logoLight from '../assets/logo-light.png';
+import logoDark from '../assets/logo-dark.png';
 import {
   DashboardIcon,
   SkillsIcon,
@@ -24,10 +25,14 @@ import {
   LogoutIcon,
   SwitchModeIcon,
   CloseIcon,
+  VerifiedBadgeIcon,
+  ShieldCheckIcon,
+  UserIcon,
 } from './Icons.jsx';
 
+
 export function Sidebar({ isOpen, onClose }) {
-  const { user, mode, isTeacher, isLearner, toggleMode, logout } = useAuth();
+  const { user, mode, theme, isDarkMode, isTeacher, isLearner, isReviewer, toggleMode, logout } = useAuth();
   const navigate = useNavigate();
 
   function handleLogout() {
@@ -56,7 +61,7 @@ export function Sidebar({ isOpen, onClose }) {
         <div className="sidebar-header">
           <NavLink to="/" className="sidebar-brand" onClick={onClose} aria-label="Skill Exchange Home">
             <img
-              src={brandLogo}
+              src={isDarkMode ? logoDark : logoLight}
               alt="Skill Exchange"
               className="sidebar-brand-logo"
             />
@@ -87,57 +92,114 @@ export function Sidebar({ isOpen, onClose }) {
           </NavLink>
 
           <NavLink
-            to="/profile"
+            to="/courses"
             className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
             onClick={onClose}
           >
             <SkillsIcon size={19} />
-            <span>{isTeacher ? 'My Skills & Quizzes' : 'My Skills & Profile'}</span>
+            <span>Available Courses</span>
           </NavLink>
 
+          <NavLink
+            to="/profile"
+            className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
+            onClick={onClose}
+          >
+            <UserIcon size={19} />
+            <span>{isTeacher ? 'Offered Skills & Profile' : 'My Skills & Profile'}</span>
+          </NavLink>
+
+          {/* Mode-Specific Tools Section */}
           <span className="sidebar-nav-heading">
-            {isTeacher ? 'Teaching Hub' : 'Learning Hub'}
+            {isTeacher ? 'Teaching Tools' : 'Learning Tools'}
           </span>
 
-          {isLearner && (
-            <NavLink
-              to="/search"
-              className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
-              onClick={onClose}
-            >
-              <SearchIcon size={19} />
-              <span>Find Mentors</span>
-            </NavLink>
+          {isLearner ? (
+            <>
+              <NavLink
+                to="/search"
+                className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
+                onClick={onClose}
+              >
+                <SearchIcon size={19} />
+                <span>Find Mentors</span>
+              </NavLink>
+
+              <NavLink
+                to="/recommendations"
+                className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
+                onClick={onClose}
+              >
+                <SparklesIcon size={19} />
+                <span>Recommendations</span>
+              </NavLink>
+
+              <NavLink
+                to="/booking"
+                className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
+                onClick={onClose}
+              >
+                <CalendarIcon size={19} />
+                <span>Book Mentor Session</span>
+              </NavLink>
+
+              <NavLink
+                to="/requests"
+                className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
+                onClick={onClose}
+              >
+                <RequestIcon size={19} />
+                <span>Request a Skill</span>
+              </NavLink>
+            </>
+          ) : (
+            <>
+              <NavLink
+                to="/teacher-verification"
+                className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
+                onClick={onClose}
+              >
+                <VerifiedBadgeIcon size={19} />
+                <span>Teacher Verification</span>
+              </NavLink>
+
+              <NavLink
+                to="/requests"
+                className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
+                onClick={onClose}
+              >
+                <RequestIcon size={19} />
+                <span>Incoming Learner Requests</span>
+              </NavLink>
+
+              <NavLink
+                to="/history?view=teaching"
+                className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
+                onClick={onClose}
+              >
+                <CalendarIcon size={19} />
+                <span>Teaching Sessions</span>
+              </NavLink>
+            </>
           )}
 
-          <NavLink
-            to="/recommendations"
-            className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
-            onClick={onClose}
-          >
-            <SparklesIcon size={19} />
-            <span>{isTeacher ? 'Community Matches' : 'Recommendations'}</span>
-          </NavLink>
+          {/* Reviewer Portal: strictly visible only to sole authorized reviewer account */}
+          {isReviewer && (
+            <>
+              <span className="sidebar-nav-heading">Reviewer Administration</span>
+              <NavLink
+                to="/reviewer"
+                className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
+                onClick={onClose}
+              >
+                <ShieldCheckIcon size={19} />
+                <span>Reviewer Portal</span>
+              </NavLink>
+            </>
+          )}
 
-          <NavLink
-            to="/booking"
-            className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
-            onClick={onClose}
-          >
-            <CalendarIcon size={19} />
-            <span>{isTeacher ? 'Mentorship Sessions' : 'Book a Session'}</span>
-          </NavLink>
-
-          <NavLink
-            to="/requests"
-            className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}
-            onClick={onClose}
-          >
-            <RequestIcon size={19} />
-            <span>{isTeacher ? 'Learner Skill Requests' : 'Request a Skill'}</span>
-          </NavLink>
-
-          <span className="sidebar-nav-heading">Activity & History</span>
+          {/* Shared Communication & History Section */}
+          <span className="sidebar-nav-heading">Communication & History</span>
 
           <NavLink
             to="/messages"
@@ -167,6 +229,7 @@ export function Sidebar({ isOpen, onClose }) {
           </NavLink>
         </nav>
 
+
         {/* Sidebar Footer with Mode Switch & Logout */}
         <div className="sidebar-footer">
           <div className="sidebar-mode-indicator">
@@ -174,7 +237,7 @@ export function Sidebar({ isOpen, onClose }) {
               <div style={{ fontSize: '0.72rem', color: 'var(--color-text-muted)', textTransform: 'uppercase', fontWeight: '700' }}>
                 Active Mode
               </div>
-              <div style={{ fontWeight: '700', color: isTeacher ? '#a78bfa' : '#60a5fa', textTransform: 'capitalize' }}>
+              <div style={{ fontWeight: '700', color: isTeacher ? 'var(--color-teacher)' : 'var(--color-learner)', textTransform: 'capitalize' }}>
                 {mode} Mode
               </div>
             </div>

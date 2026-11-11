@@ -328,7 +328,7 @@ class MaxHeap {
     }
 
     const totalRaw = skillScore + reputationScore + proximityScore;
-    const finalScore = Math.min(99, Math.max(30, Math.round(totalRaw)));
+    const finalScore = Math.min(100, Math.max(0, Math.round(totalRaw)));
 
     let reason;
     if (matchingSkills.length > 0) {

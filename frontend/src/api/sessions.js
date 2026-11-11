@@ -56,3 +56,68 @@ export async function submitSessionReview(reviewData) {
     body: JSON.stringify(reviewData),
   });
 }
+
+/**
+ * Teacher accepts a pending session booking.
+ * @param {string} sessionId
+ * @returns {Promise<{message: string, status: string}>}
+ */
+export async function acceptSession(sessionId) {
+  return await request(`/sessions/${sessionId}/accept`, {
+    method: 'POST',
+  });
+}
+
+/**
+ * Teacher declines a pending session booking.
+ * @param {string} sessionId
+ * @param {string} [reason]
+ * @returns {Promise<{message: string, status: string, declinedReason: string}>}
+ */
+export async function declineSession(sessionId, reason = '') {
+  return await request(`/sessions/${sessionId}/decline`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  });
+}
+
+/**
+ * Either participant marks an accepted session as completed.
+ * @param {string} sessionId
+ * @returns {Promise<{message: string, status: string}>}
+ */
+export async function completeSession(sessionId) {
+  return await request(`/sessions/${sessionId}/complete`, {
+    method: 'POST',
+  });
+}
+
+/**
+ * Fetches real available courses backed by canonical skill_catalog with approved teachers.
+ * @param {string} [category]
+ * @param {string} [search]
+ * @returns {Promise<{courses: Array, count: number}>}
+ */
+export async function getAvailableCourses(category = '', search = '') {
+  const params = new URLSearchParams();
+  if (category) params.append('category', category);
+  if (search) params.append('search', search);
+  const queryStr = params.toString() ? `?${params.toString()}` : '';
+  return await request(`/courses/available${queryStr}`, {
+    method: 'GET',
+  });
+}
+
+/**
+ * Validates a course or skill name against the canonical database-backed catalog.
+ * Returns spelling suggestions if misspelled without modifying the catalog.
+ * @param {string} courseName
+ * @returns {Promise<{valid: boolean, canonicalName?: string, category?: string, suggestion?: string, message: string}>}
+ */
+export async function validateCourseName(courseName) {
+  const queryParam = encodeURIComponent(courseName || '');
+  return await request(`/courses/validate?name=${queryParam}`, {
+    method: 'GET',
+  });
+}
+

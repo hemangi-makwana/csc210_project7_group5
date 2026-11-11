@@ -10,7 +10,7 @@
  */
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { loginUser, registerUser } from '../api/auth.js';
+import { loginUser, registerUser, getMe } from '../api/auth.js';
 import { updateUserProfile } from '../api/skills.js';
 
 // Create the Context object
@@ -24,20 +24,33 @@ export function AuthProvider({ children }) {
   // Current logged in user object, or null if logged out
   const [user, setUser] = useState(null);
 
-  // Active view/interaction mode: 'learner' or 'teacher'
+  // Active view/interaction mode: 'learner' or 'teacher' (controls role-specific actions/views)
   const [mode, setModeState] = useState(() => {
     return localStorage.getItem('skillexchange_mode') || 'learner';
+  });
+
+  // Independent Visual Theme: 'light' or 'dark' (Default is LIGHT MODE)
+  const [theme, setThemeState] = useState(() => {
+    return localStorage.getItem('skillexchange_theme') || 'light';
   });
 
   // Loading state while checking localStorage on initial application startup
   const [isLoading, setIsLoading] = useState(true);
 
+  // Session expiration flag for clear recovery handling
+  const [sessionExpired, setSessionExpired] = useState(false);
+
+  function clearSessionExpired() {
+    setSessionExpired(false);
+  }
+
   /**
    * On initial component mount, check localStorage for an existing JWT token
    * and saved user profile to persist the login across browser refreshes.
+   * Validates the session with the backend to clear expired sessions early.
    */
   useEffect(() => {
-    function restoreSession() {
+    async function restoreSession() {
       try {
         const storedToken = localStorage.getItem('token');
         const storedUserData = localStorage.getItem('user_data');
@@ -51,18 +64,78 @@ export function AuthProvider({ children }) {
             setModeState(parsedUser.active_mode);
             localStorage.setItem('skillexchange_mode', parsedUser.active_mode);
           }
+
+          // Verify token against backend PostgreSQL to clear expired or invalid sessions
+          try {
+            const meRes = await getMe();
+            if (meRes && meRes.user) {
+              setUser(meRes.user);
+              localStorage.setItem('user_data', JSON.stringify(meRes.user));
+              if (meRes.user.active_mode) {
+                setModeState(meRes.user.active_mode);
+                localStorage.setItem('skillexchange_mode', meRes.user.active_mode);
+              }
+            }
+          } catch (verifyErr) {
+            if (verifyErr.status === 401 || (verifyErr.message && verifyErr.message.toLowerCase().includes('expired'))) {
+              console.warn('[AuthContext] Session expired or invalid, clearing local session.');
+              localStorage.removeItem('token');
+              localStorage.removeItem('user_data');
+              setUser(null);
+              setSessionExpired(true);
+            }
+          }
         }
       } catch (error) {
         console.error('Failed to restore session from localStorage:', error);
         localStorage.removeItem('token');
         localStorage.removeItem('user_data');
+        setUser(null);
       } finally {
         setIsLoading(false);
       }
     }
 
     restoreSession();
+
+    function handleUnauthorized() {
+      setUser(null);
+      setSessionExpired(true);
+    }
+    window.addEventListener('auth:unauthorized', handleUnauthorized);
+    return () => window.removeEventListener('auth:unauthorized', handleUnauthorized);
   }, []);
+
+  /**
+   * Synchronize root data-mode and data-theme attributes for global styling.
+   * - data-mode controls role-specific views and dashboard features
+   * - data-theme controls visual surface presentation (light vs dark mode)
+   */
+  useEffect(() => {
+    document.documentElement.setAttribute('data-mode', mode);
+  }, [mode]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('skillexchange_theme', theme);
+  }, [theme]);
+
+  /**
+   * Sets the visual theme ('light' | 'dark').
+   * Persisted independently of role mode.
+   */
+  function setTheme(newTheme) {
+    const validTheme = newTheme === 'dark' ? 'dark' : 'light';
+    setThemeState(validTheme);
+  }
+
+  /**
+   * Accessible theme toggle between Light and Dark mode.
+   */
+  function toggleTheme() {
+    setThemeState((prev) => (prev === 'dark' ? 'light' : 'dark'));
+  }
+
 
   /**
    * Sets the active mode ('learner' | 'teacher').
@@ -133,25 +206,21 @@ export function AuthProvider({ children }) {
    * Logs in a user with email and password.
    */
   async function login(email, password) {
-    setIsLoading(true);
-    try {
-      const response = await loginUser(email, password);
+    const response = await loginUser(email, password);
 
-      if (response && response.token && response.user) {
-        localStorage.setItem('token', response.token);
-        localStorage.setItem('user_data', JSON.stringify(response.user));
+    if (response && response.token && response.user) {
+      localStorage.setItem('token', response.token);
+      localStorage.setItem('user_data', JSON.stringify(response.user));
 
-        const userMode = response.user.active_mode || 'learner';
-        setModeState(userMode);
-        localStorage.setItem('skillexchange_mode', userMode);
+      const userMode = response.user.active_mode || 'learner';
+      setModeState(userMode);
+      localStorage.setItem('skillexchange_mode', userMode);
 
-        setUser(response.user);
-        return response.user;
-      } else {
-        throw new Error('Invalid response from server during login');
-      }
-    } finally {
-      setIsLoading(false);
+      setUser(response.user);
+      setSessionExpired(false);
+      return response.user;
+    } else {
+      throw new Error('Invalid response from server during login');
     }
   }
 
@@ -159,24 +228,20 @@ export function AuthProvider({ children }) {
    * Registers a user and starts their authenticated session.
    */
   async function register(name, email, password, role, extraFields = {}) {
-    setIsLoading(true);
-    try {
-      const response = await registerUser({ name, email, password, role, ...extraFields });
-      if (response && response.token && response.user) {
-        localStorage.setItem('token', response.token);
-        localStorage.setItem('user_data', JSON.stringify(response.user));
+    const response = await registerUser({ name, email, password, role, ...extraFields });
+    if (response && response.token && response.user) {
+      localStorage.setItem('token', response.token);
+      localStorage.setItem('user_data', JSON.stringify(response.user));
 
-        const userMode = response.user.active_mode || 'learner';
-        setModeState(userMode);
-        localStorage.setItem('skillexchange_mode', userMode);
+      const userMode = response.user.active_mode || 'learner';
+      setModeState(userMode);
+      localStorage.setItem('skillexchange_mode', userMode);
 
-        setUser(response.user);
-        return response.user;
-      }
-      throw new Error('Invalid response from server during registration');
-    } finally {
-      setIsLoading(false);
+      setUser(response.user);
+      setSessionExpired(false);
+      return response.user;
     }
+    throw new Error('Invalid response from server during registration');
   }
 
   /**
@@ -186,12 +251,64 @@ export function AuthProvider({ children }) {
     localStorage.removeItem('token');
     localStorage.removeItem('user_data');
     setUser(null);
+    setSessionExpired(false);
   }
+
+  const [isOnline, setIsOnline] = useState(false);
+
+  // Authenticated presence heartbeat: updates PostgreSQL presence map every 25 seconds
+  useEffect(() => {
+    let timer = null;
+    let isCancelled = false;
+
+    async function sendPresenceHeartbeat() {
+      const token = localStorage.getItem('token');
+      if (!token || !user) {
+        setIsOnline(false);
+        return;
+      }
+      try {
+        const res = await fetch('/api/presence/heartbeat', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+        });
+        if (!isCancelled) {
+          setIsOnline(res.ok);
+        }
+      } catch (err) {
+        if (!isCancelled) {
+          setIsOnline(false);
+        }
+      }
+    }
+
+    if (user) {
+      sendPresenceHeartbeat();
+      timer = setInterval(sendPresenceHeartbeat, 25000);
+    } else {
+      setIsOnline(false);
+    }
+
+    return () => {
+      isCancelled = true;
+      if (timer) clearInterval(timer);
+    };
+  }, [user]);
 
   const isTeacher = mode === 'teacher';
   const isLearner = mode === 'learner';
   const canTeach = user ? (user.can_teach !== false) : true;
   const canLearn = user ? (user.can_learn !== false) : true;
+  // Designated Sole Reviewer: strictly authenticated account for kailashsampath15@gmail.com
+  const isReviewer = Boolean(
+    user &&
+    user.email &&
+    user.email.trim().toLowerCase() === 'kailashsampath15@gmail.com'
+  );
+  const isDarkMode = theme === 'dark';
 
   // Value bundle shared with all consuming components
   const contextValue = {
@@ -199,10 +316,16 @@ export function AuthProvider({ children }) {
     mode: mode,
     setMode: setMode,
     toggleMode: toggleMode,
+    theme: theme,
+    setTheme: setTheme,
+    toggleTheme: toggleTheme,
+    isDarkMode: isDarkMode,
     isTeacher: isTeacher,
     isLearner: isLearner,
     canTeach: canTeach,
     canLearn: canLearn,
+    isReviewer: isReviewer,
+    isOnline: isOnline,
     updateCapabilities: updateCapabilities,
     updateLocalUser: updateLocalUser,
     login: login,
@@ -210,6 +333,8 @@ export function AuthProvider({ children }) {
     logout: logout,
     isLoading: isLoading,
     isAuthenticated: !!user,
+    sessionExpired: sessionExpired,
+    clearSessionExpired: clearSessionExpired,
   };
 
   return (

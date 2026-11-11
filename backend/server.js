@@ -44,31 +44,38 @@ const HashTable = require("./dsa/hashTable");
 const Queue = require("./dsa/queue");
 const Graph = require("./dsa/graph");
 const MaxHeap = require("./dsa/heap");
+const {
+  VerificationDecisionTree,
+  ResumePreChecker,
+  VerificationLifecycleManager,
+} = require("./dsa/decisionTree");
+const ReputationEngine = require("./dsa/reputationEngine");
+const { validateFileSignature } = require("./utils/fileValidation");
+
+// Designated Sole Reviewer Email (strictly enforced on server, case-insensitive)
+const SOLE_REVIEWER_EMAIL = "kailashsampath15@gmail.com".toLowerCase();
+
+// Active User Presence Heartbeat Map (userId -> timestamp)
+const userPresenceMap = new Map();
+
+// Active WebRTC Call Signaling Messages (conversationId -> Array of signals)
+const callSignalingMap = new Map();
+
+const verificationDecisionTree = new VerificationDecisionTree();
+const reputationEngine = new ReputationEngine(31, 4.0, 3);
+
 const { pool, query, checkConnection, isPoolInitialized } = require("./db/index");
 const { setupDatabase } = require("./db/setup");
-const {
-  hasQuestionBank,
-  generateQuiz,
-  getQuestionDetails,
-  getSupportedSkills,
-} = require("./quizzes/questionBanks");
-
-// In-memory active quiz sessions Map: quizId -> { quizId, userId, skillName, answerKey, clientQuestions, expiresAt }
-const activeQuizSessions = new Map();
-
-// Periodic cleanup of expired quiz sessions (older than 1 hour)
-setInterval(() => {
-  const now = Date.now();
-  for (const [quizId, session] of activeQuizSessions.entries()) {
-    if (session.expiresAt && session.expiresAt < now) {
-      activeQuizSessions.delete(quizId);
-    }
-  }
-}, 10 * 60 * 1000);
-
-// JWT signing secret — loaded from backend/.env, never hardcoded.
-// If missing, auth routes will return 500 rather than sign a token with no secret.
-const JWT_SECRET = process.env.JWT_SECRET || null;
+// JWT signing secret — loaded strictly from backend/.env, never hardcoded.
+// The backend requires JWT_SECRET and fails safely on startup if missing.
+const JWT_SECRET = process.env.JWT_SECRET || (process.env.NODE_ENV === "test" ? require("crypto").randomBytes(32).toString("hex") : null);
+if (!JWT_SECRET) {
+  console.error(
+    "FATAL CONFIGURATION ERROR: JWT_SECRET environment variable is missing or empty in backend/.env.\n" +
+    "The application cannot start securely without a configured JWT_SECRET."
+  );
+  process.exit(1);
+}
 const JWT_EXPIRES_IN = "7d";
 
 // Create the Express application instance
@@ -81,14 +88,60 @@ application.use(cors());
 // Middleware 2: Automatically parse incoming JSON request bodies into JavaScript objects
 application.use(express.json());
 
-// Ensure local uploads/avatars directory exists
+// Ensure local uploads/avatars and uploads/documents directories exist
 const uploadsDir = path.join(__dirname, "uploads");
 const avatarsDir = path.join(uploadsDir, "avatars");
+const documentsDir = path.join(uploadsDir, "documents");
+const attachmentsDir = path.join(uploadsDir, "attachments");
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 if (!fs.existsSync(avatarsDir)) fs.mkdirSync(avatarsDir, { recursive: true });
+if (!fs.existsSync(documentsDir)) fs.mkdirSync(documentsDir, { recursive: true });
+if (!fs.existsSync(attachmentsDir)) fs.mkdirSync(attachmentsDir, { recursive: true });
 
-// Static file serving for uploaded profile photos
-application.use("/uploads", express.static(uploadsDir));
+// Multer storage engine for Session Chat Attachments & Voice Notes
+const attachmentStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, attachmentsDir);
+  },
+  filename: function (req, file, cb) {
+    const rawExt = path.extname(file.originalname).toLowerCase();
+    const safeExt = [
+      ".pdf", ".docx", ".xlsx", ".png", ".jpg", ".jpeg", ".webp",
+      ".webm", ".ogg", ".wav", ".mp3", ".m4a"
+    ].includes(rawExt) ? rawExt : ".bin";
+    const userPart = req.user ? req.user.userId : "anon";
+    const filename = `attach_${userPart}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}${safeExt}`;
+    cb(null, filename);
+  },
+});
+
+const attachmentUpload = multer({
+  storage: attachmentStorage,
+  limits: { fileSize: 15 * 1024 * 1024 }, // 15 MB maximum
+  fileFilter: function (req, file, cb) {
+    const rawExt = path.extname(file.originalname).toLowerCase();
+    const mime = (file.mimetype || "").toLowerCase();
+    const allowedExts = [
+      ".pdf", ".docx", ".xlsx", ".png", ".jpg", ".jpeg", ".webp",
+      ".webm", ".ogg", ".wav", ".mp3", ".m4a"
+    ];
+    if (
+      allowedExts.includes(rawExt) ||
+      mime.startsWith("image/") ||
+      mime.startsWith("audio/") ||
+      mime.includes("pdf") ||
+      mime.includes("officedocument") ||
+      mime.includes("msword")
+    ) {
+      return cb(null, true);
+    }
+    return cb(new Error("File format not supported. Permitted types: PDF, DOCX, XLSX, images, and audio voice recordings."));
+  },
+});
+
+// Static file serving for uploaded profile photos ONLY
+// Secure: Verification documents are strictly served through authenticated routes, never exposed statically.
+application.use("/uploads/avatars", express.static(avatarsDir));
 
 // Multer storage engine for avatar images
 const avatarStorage = multer.diskStorage({
@@ -116,15 +169,98 @@ const avatarUpload = multer({
   },
 });
 
+// Multer storage engine for Teacher Verification documents (Resume & Certificates)
+const documentStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, documentsDir);
+  },
+  filename: function (req, file, cb) {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const safeExt = [".pdf", ".docx", ".jpg", ".jpeg", ".png"].includes(ext) ? ext : ".pdf";
+    const prefix = file.fieldname === "resume" ? "resume" : "cert";
+    const userPart = req.user ? req.user.userId : "anon";
+    const filename = `${prefix}_${userPart}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}${safeExt}`;
+    cb(null, filename);
+  },
+});
+
+const documentUpload = multer({
+  storage: documentStorage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB maximum
+  fileFilter: function (req, file, cb) {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const mime = (file.mimetype || "").toLowerCase();
+    if (file.fieldname === "resume") {
+      const allowedExt = [".pdf", ".docx"];
+      const allowedMime = [
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+        "application/octet-stream",
+      ];
+      if (allowedExt.includes(ext) || allowedMime.includes(mime)) {
+        return cb(null, true);
+      }
+      return cb(new Error("Invalid resume format. Only PDF and DOCX files up to 5MB are permitted."));
+    } else if (file.fieldname === "certificate") {
+      const allowedExt = [".pdf", ".jpg", ".jpeg", ".png"];
+      const allowedMime = ["application/pdf", "image/jpeg", "image/png", "image/jpg"];
+      if (allowedExt.includes(ext) || allowedMime.includes(mime)) {
+        return cb(null, true);
+      }
+      return cb(new Error("Invalid certificate format. Only PDF, JPG, and PNG files up to 5MB are permitted."));
+    }
+    cb(new Error("Unexpected file field in upload."));
+  },
+});
+
 /**
  * Authentication Middleware: authenticateToken
  * Verifies the JWT Bearer token from the incoming request's Authorization header.
- * Attaches decoded user payload { userId, email, role } to request.user.
+ * Attaches decoded user payload { userId, email, role, isReviewer, canTeach, canLearn } to request.user.
  * Protects endpoints and ensures users can only access/modify authorized resources.
  */
-function authenticateToken(request, response, next) {
-  const authHeader = request.headers["authorization"];
-  const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+/**
+ * Strict Sole Reviewer Authorization Middleware
+ * Verifies that the authenticated user's authoritative email in PostgreSQL
+ * matches kailashsampath15@gmail.com (case-insensitively).
+ * Never trusts client headers or unverified body parameters.
+ */
+async function requireReviewerAuth(request, response, next) {
+  if (!request.user || !request.user.userId) {
+    return response.status(401).json({ error: "Authentication required." });
+  }
+
+  try {
+    const userRes = await query("SELECT email, is_reviewer FROM users WHERE id = $1", [request.user.userId]);
+    if (!userRes.rows || userRes.rows.length === 0) {
+      return response.status(403).json({ error: "Access denied. User not found." });
+    }
+    const dbEmail = (userRes.rows[0].email || "").trim().toLowerCase();
+    if (dbEmail !== SOLE_REVIEWER_EMAIL) {
+      return response.status(403).json({
+        error: "Access denied. Only the designated reviewer (kailashsampath15@gmail.com) may access reviewer endpoints.",
+      });
+    }
+    request.user.is_reviewer = true;
+    request.user.email = dbEmail;
+    next();
+  } catch (err) {
+    return response.status(500).json({ error: "Failed to verify reviewer authorization." });
+  }
+}
+
+async function authenticateToken(request, response, next) {
+  const authHeader = request.headers["authorization"] || request.headers["Authorization"];
+  let token = null;
+  if (authHeader && typeof authHeader === "string") {
+    const match = authHeader.match(/^bearer\s+(.+)$/i);
+    if (match) {
+      token = match[1].trim();
+    }
+  } else if (request.query && request.query.token) {
+    token = request.query.token;
+  }
 
   if (!token) {
     return response.status(401).json({
@@ -141,12 +277,116 @@ function authenticateToken(request, response, next) {
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     request.user = decoded;
+
+    // Query fresh database permissions so reviewer changes take effect immediately
+    try {
+      const uRes = await query(
+        `SELECT is_reviewer, can_teach, can_learn, active_mode FROM users WHERE id = $1`,
+        [decoded.userId]
+      );
+      if (uRes.rows && uRes.rows[0]) {
+        request.user.is_reviewer = Boolean(uRes.rows[0].is_reviewer);
+        request.user.isReviewer = Boolean(uRes.rows[0].is_reviewer);
+        request.user.canTeach = Boolean(uRes.rows[0].can_teach);
+        request.user.canLearn = Boolean(uRes.rows[0].can_learn);
+        request.user.activeMode = uRes.rows[0].active_mode;
+      } else {
+        request.user.is_reviewer = false;
+        request.user.isReviewer = false;
+      }
+    } catch (dbErr) {
+      request.user.is_reviewer = false;
+      request.user.isReviewer = false;
+    }
+
     next();
   } catch (err) {
+    console.warn(`[Auth] JWT verification failed: ${err.name} - ${err.message}`);
     return response.status(401).json({
       error: "Invalid or expired session token. Please log in again.",
     });
   }
+}
+
+/**
+ * Computes Levenshtein edit distance between two strings for close-spelling suggestions.
+ */
+function computeLevenshteinDistance(a, b) {
+  const an = a ? a.length : 0;
+  const bn = b ? b.length : 0;
+  if (an === 0) return bn;
+  if (bn === 0) return an;
+  const matrix = Array.from({ length: bn + 1 }, () => Array(an + 1).fill(0));
+  for (let i = 0; i <= an; i++) matrix[0][i] = i;
+  for (let j = 0; j <= bn; j++) matrix[j][0] = j;
+  for (let j = 1; j <= bn; j++) {
+    for (let i = 1; i <= an; i++) {
+      if (a[i - 1].toLowerCase() === b[j - 1].toLowerCase()) {
+        matrix[j][i] = matrix[j - 1][i - 1];
+      } else {
+        matrix[j][i] = Math.min(
+          matrix[j - 1][i] + 1,
+          matrix[j][i - 1] + 1,
+          matrix[j - 1][i - 1] + 1
+        );
+      }
+    }
+  }
+  return matrix[bn][an];
+}
+
+/**
+ * Validates a skill name against PostgreSQL skill_catalog.
+ * Returns { valid: boolean, canonicalName?: string, category?: string, suggestion?: string, message?: string }
+ */
+async function validateSkillAgainstCatalog(skillName) {
+  if (!skillName || typeof skillName !== "string") {
+    return { valid: false, error: "Skill name is required." };
+  }
+  const clean = skillName.trim();
+  if (clean.length === 0) {
+    return { valid: false, error: "Skill name cannot be empty." };
+  }
+
+  const catalogRes = await query(
+    `SELECT id, name, category, description FROM skill_catalog ORDER BY name ASC`
+  );
+  const catalog = catalogRes.rows || [];
+
+  // Check exact case-insensitive match
+  const exact = catalog.find((c) => c.name.toLowerCase() === clean.toLowerCase());
+  if (exact) {
+    return { valid: true, canonicalName: exact.name, category: exact.category, catalogItem: exact };
+  }
+
+  // Find close spelling suggestion using edit distance
+  let closest = null;
+  let minDistance = Infinity;
+
+  for (const item of catalog) {
+    const itemName = item.name;
+    const dist = computeLevenshteinDistance(clean.toLowerCase(), itemName.toLowerCase());
+    const maxThreshold = Math.max(2, Math.floor(itemName.length * 0.35));
+    if (dist <= maxThreshold && dist < minDistance) {
+      minDistance = dist;
+      closest = item;
+    }
+  }
+
+  if (closest) {
+    return {
+      valid: false,
+      canonicalName: null,
+      suggestion: closest.name,
+      message: `"${clean}" was not found in the course catalog. Did you mean "${closest.name}"?`,
+    };
+  }
+
+  return {
+    valid: false,
+    canonicalName: null,
+    message: `"${clean}" does not exist in the course catalog. Please choose a valid skill from the catalog.`,
+  };
 }
 
 /**
@@ -712,6 +952,156 @@ function sortMentorsByLevel(mentorsList) {
 // ----------------------------------------------------------------------------
 
 /**
+ * ENDPOINT: GET /api/courses/available
+ *
+ * Populates real Available Courses from canonical skill_catalog entries that have
+ * an available, approved (verified) teacher in PostgreSQL.
+ * Supports optional category and text search filters.
+ */
+application.get("/api/courses/available", async (request, response) => {
+  try {
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({
+        error: "Database unavailable. Available courses could not be retrieved.",
+        courses: [],
+      });
+    }
+
+    const { category, search } = request.query;
+    let filterSql = "";
+    const params = [];
+
+    if (category && typeof category === "string" && category.trim() !== "All" && category.trim() !== "") {
+      params.push(category.trim());
+      filterSql += ` AND LOWER(sc.category) = LOWER($${params.length})`;
+    }
+
+    if (search && typeof search === "string" && search.trim() !== "") {
+      params.push(`%${search.trim().toLowerCase()}%`);
+      filterSql += ` AND (LOWER(sc.name) LIKE $${params.length} OR LOWER(sc.description) LIKE $${params.length})`;
+    }
+
+    const dbResult = await query(
+      `SELECT sc.id, sc.name, sc.category, sc.description,
+              COUNT(DISTINCT s.user_id)::int AS teacher_count,
+              json_agg(
+                json_build_object(
+                  'id', u.id,
+                  'name', u.name,
+                  'avatar_url', u.avatar_url,
+                  'reputation_score', COALESCE(u.reputation_score, 5.00),
+                  'level', s.level,
+                  'bio', u.bio
+                ) ORDER BY COALESCE(u.reputation_score, 5.00) DESC
+              ) AS teachers
+       FROM skill_catalog sc
+       JOIN skills s ON LOWER(s.skill_name) = LOWER(sc.name) AND s.type = 'teach' AND s.is_verified = TRUE
+       JOIN users u ON s.user_id = u.id
+       WHERE 1=1 ${filterSql}
+       GROUP BY sc.id, sc.name, sc.category, sc.description
+       ORDER BY sc.name ASC`,
+      params
+    );
+
+    let suggestion = null;
+    let message = null;
+    let isCatalogCourse = false;
+
+    if (search && typeof search === "string" && search.trim() !== "" && (!dbResult.rows || dbResult.rows.length === 0)) {
+      const validation = await validateSkillAgainstCatalog(search.trim());
+      if (validation.valid) {
+        isCatalogCourse = true;
+        message = `"${validation.canonicalName}" is a valid catalog course, but no verified teachers are currently offering active sessions. You can post a course request to alert verified educators!`;
+      } else if (validation.suggestion) {
+        suggestion = validation.suggestion;
+        message = validation.message;
+      } else {
+        message = validation.message;
+      }
+    }
+
+    return response.status(200).json({
+      courses: dbResult.rows || [],
+      count: dbResult.rows ? dbResult.rows.length : 0,
+      search: search ? search.trim() : null,
+      suggestion,
+      message,
+      isCatalogCourse,
+    });
+  } catch (error) {
+    console.error("Error retrieving available courses:", error);
+    return response.status(500).json({
+      error: "An error occurred while retrieving available courses.",
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * ENDPOINT: GET /api/courses/validate
+ * Validates a course or skill name against the canonical PostgreSQL skill_catalog.
+ * Returns spelling suggestions (via Levenshtein distance) if misspelled.
+ * Note: Never modifies or inserts into skill_catalog.
+ */
+application.get("/api/courses/validate", async (request, response) => {
+  try {
+    const courseName = request.query.name || request.query.course;
+    if (!courseName || typeof courseName !== "string" || !courseName.trim()) {
+      return response.status(400).json({ error: "Course name query parameter is required." });
+    }
+    const validation = await validateSkillAgainstCatalog(courseName.trim());
+    return response.status(200).json({
+      query: courseName.trim(),
+      valid: validation.valid,
+      canonicalName: validation.canonicalName || null,
+      category: validation.category || null,
+      suggestion: validation.suggestion || null,
+      message: validation.message,
+    });
+  } catch (err) {
+    console.error("Error validating course name:", err);
+    return response.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * ENDPOINT: GET /api/skills/catalog
+ *
+ * Retrieves canonical course and skill catalog backed by PostgreSQL skill_catalog.
+ * Returns canonical list grouped by domain category for validation and selection.
+ */
+application.get("/api/skills/catalog", async (request, response) => {
+  try {
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({
+        error: "Database unavailable. Catalog could not be retrieved.",
+        catalog: [],
+      });
+    }
+
+    const catRes = await query(
+      `SELECT id, name, category, description, created_at
+       FROM skill_catalog
+       ORDER BY category ASC, name ASC`
+    );
+
+    return response.status(200).json({
+      catalog: catRes.rows || [],
+      count: catRes.rows ? catRes.rows.length : 0,
+      source: "postgresql",
+    });
+  } catch (error) {
+    console.error("Error retrieving skill catalog:", error);
+    return response.status(500).json({
+      error: "An internal server error occurred while retrieving the skill catalog.",
+      details: error.message,
+    });
+  }
+});
+
+/**
  * ENDPOINT 1: GET /api/skills/search?query=<skillName>
  *
  * WHAT IT DOES:
@@ -734,32 +1124,51 @@ application.get("/api/skills/search", async (request, response) => {
 
     if (conn.reachable) {
       const dbResult = await query(
-        `SELECT u.id, u.id as "userId", u.name, u.role, u.bio, u.reputation_score as "reputationScore",
-                u.is_demo, u.avatar_url, s.skill_name, s.level, COALESCE(s.is_verified, FALSE) as is_verified,
+        `SELECT u.id, u.id as "userId", u.name, u.role, u.bio, u.profile_summary,
+                u.reputation_score as "reputationScore", u.is_demo, u.avatar_url,
+                COALESCE(array_agg(s.skill_name) FILTER (WHERE s.type = 'teach'), '{}') as skills,
                 COALESCE(
-                  (SELECT array_agg(s2.skill_name) FROM skills s2 WHERE s2.user_id = u.id AND s2.type = 'teach'),
-                  ARRAY[s.skill_name]
-                ) as skills,
-                COALESCE(
-                  (SELECT json_agg(json_build_object('skill_name', s3.skill_name, 'level', s3.level, 'type', s3.type, 'is_verified', COALESCE(s3.is_verified, FALSE)))
-                   FROM skills s3 WHERE s3.user_id = u.id AND s3.type = 'teach'),
-                  '[]'::jsonb
-                ) as skill_entries
+                  json_agg(
+                    json_build_object(
+                      'skill_name', s.skill_name,
+                      'level', s.level,
+                      'type', s.type,
+                      'is_verified', COALESCE(s.is_verified, FALSE)
+                    )
+                  ) FILTER (WHERE s.type = 'teach'),
+                  '[]'::json
+                ) as skill_entries,
+                BOOL_OR(COALESCE(s.is_verified, FALSE)) as is_verified
          FROM users u
          JOIN skills s ON u.id = s.user_id
-         WHERE s.type = 'teach' AND LOWER(s.skill_name) LIKE LOWER($1)
-         ORDER BY s.is_verified DESC,
-           CASE s.level WHEN 'expert' THEN 1 WHEN 'intermediate' THEN 2 ELSE 3 END,
-           u.reputation_score DESC`,
+         WHERE s.type = 'teach'
+         GROUP BY u.id, u.name, u.role, u.bio, u.profile_summary, u.reputation_score, u.is_demo, u.avatar_url
+         HAVING BOOL_OR(LOWER(s.skill_name) LIKE LOWER($1))
+         ORDER BY BOOL_OR(COALESCE(s.is_verified, FALSE)) DESC, u.reputation_score DESC`,
         [`%${cleanQuery}%`]
       );
 
-      if (dbResult.rows && dbResult.rows.length > 0) {
-        return response.status(200).json({
-          mentors: dbResult.rows,
-          source: "postgresql",
-        });
+      let suggestion = null;
+      let message = null;
+      if (!dbResult.rows || dbResult.rows.length === 0) {
+        const validation = await validateSkillAgainstCatalog(cleanQuery);
+        if (validation.valid) {
+          message = `"${validation.canonicalName}" is a valid catalog course, but no mentors currently teach this skill.`;
+        } else if (validation.suggestion) {
+          suggestion = validation.suggestion;
+          message = validation.message;
+        } else {
+          message = validation.message;
+        }
       }
+
+      return response.status(200).json({
+        mentors: dbResult.rows || [],
+        source: "postgresql",
+        search: cleanQuery,
+        suggestion,
+        message,
+      });
     }
 
     // Step 1: Use Hash Table fallback to find mentors who have this skill in O(1) average time
@@ -783,15 +1192,20 @@ application.get("/api/skills/search", async (request, response) => {
 /**
  * ENDPOINT 2: POST /api/sessions/book
  *
- * WHAT IT DOES:
- * 1. Reads booking details from request body.
- * 2. Enqueues the booking into our FIFO Queue to preserve arrival order and prevent race conditions.
- * 3. Persists the booking directly into local PostgreSQL session_bookings table.
- * 4. Returns the saved persistent record back to the frontend.
+ * Real booking workflow:
+ * 1. Validates mentorId, learnerId, and scheduledAt.
+ * 2. Creates a pending booking request in PostgreSQL session_bookings.
+ * 3. Creates a session-linked conversation in conversations so learner and teacher coordinate.
+ * 4. Posts an initial coordination message into the thread.
+ * 5. Dispatches notifications.
  */
 application.post("/api/sessions/book", async (request, response) => {
   try {
-    const { mentorId, learnerId, scheduledAt, topic, notes } = request.body;
+    const mentorId = request.body.mentorId || request.body.mentor_id;
+    const learnerId = request.body.learnerId || request.body.learner_id;
+    const scheduledAt = request.body.scheduledAt || request.body.scheduled_at || request.body.session_date;
+    const topic = request.body.topic;
+    const notes = request.body.notes;
 
     if (!mentorId || !learnerId || !scheduledAt) {
       return response.status(400).json({
@@ -799,7 +1213,12 @@ application.post("/api/sessions/book", async (request, response) => {
       });
     }
 
-    // Step 1: Verify PostgreSQL database connectivity
+    if (String(mentorId) === String(learnerId)) {
+      return response.status(400).json({
+        error: "Cannot book a mentorship session with yourself.",
+      });
+    }
+
     const conn = await checkConnection();
     if (!conn.reachable) {
       return response.status(503).json({
@@ -809,23 +1228,63 @@ application.post("/api/sessions/book", async (request, response) => {
       });
     }
 
-    const bookingId = `booking_${Date.now()}`;
+    // Verify mentor and learner accounts exist in PostgreSQL
+    const mentorCheck = await query("SELECT id, name FROM users WHERE id = $1", [String(mentorId)]);
+    if (mentorCheck.rows.length === 0) {
+      return response.status(404).json({
+        error: "Selected teacher or mentor was not found in the database.",
+      });
+    }
+
+    const learnerCheck = await query("SELECT id, name FROM users WHERE id = $1", [String(learnerId)]);
+    if (learnerCheck.rows.length === 0) {
+      return response.status(404).json({
+        error: "Learner account was not found in the database.",
+      });
+    }
+
+    const bookingId = `booking_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+
+    // Canonical order to satisfy unique constraint uq_conversation_participants
+    const u1 = String(learnerId) < String(mentorId) ? String(learnerId) : String(mentorId);
+    const u2 = String(learnerId) < String(mentorId) ? String(mentorId) : String(learnerId);
+
+    let convRes = await query(
+      `SELECT id, user1_id, user2_id FROM conversations
+       WHERE (user1_id = $1 AND user2_id = $2) OR (user1_id = $2 AND user2_id = $1)`,
+      [u1, u2]
+    );
+
+    let convId;
+    if (convRes.rows.length === 0) {
+      const convInsert = await query(
+        `INSERT INTO conversations (user1_id, user2_id, last_message_at, created_at)
+         VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         RETURNING id`,
+        [u1, u2]
+      );
+      convId = convInsert.rows[0].id;
+    } else {
+      convId = convRes.rows[0].id;
+    }
+
     const bookingRequest = {
       id: bookingId,
       bookingId: bookingId,
       mentorId: String(mentorId),
       learnerId: String(learnerId),
       scheduledAt: String(scheduledAt),
-      status: "queued",
+      status: "pending",
       topic: topic || "Mentoring Session",
       notes: notes || "",
+      conversationId: convId,
       createdAt: new Date().toISOString(),
     };
 
-    // Step 2: Persist directly into PostgreSQL session_bookings table
+    // Persist into session_bookings table first to satisfy conversations_session_id_fkey
     await query(
-      `INSERT INTO session_bookings (id, mentor_id, learner_id, scheduled_at, status, topic, notes, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
+      `INSERT INTO session_bookings (id, mentor_id, learner_id, scheduled_at, status, topic, notes, conversation_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP)
        ON CONFLICT (id) DO NOTHING`,
       [
         bookingRequest.id,
@@ -835,10 +1294,32 @@ application.post("/api/sessions/book", async (request, response) => {
         bookingRequest.status,
         bookingRequest.topic,
         bookingRequest.notes,
+        convId,
       ]
     );
 
-    // Add notification for the mentor in PostgreSQL
+    // Now link conversation to session_id and ensure thread is open
+    await query(
+      `UPDATE conversations
+       SET session_id = $1, is_closed = FALSE, closed_at = NULL, last_message_at = CURRENT_TIMESTAMP
+       WHERE id = $2`,
+      [bookingId, convId]
+    );
+
+    // Initial coordination message into messages table (id is auto-generated SERIAL)
+    const schedDate = new Date(scheduledAt);
+    const dateStr = isNaN(schedDate.getTime()) ? scheduledAt : schedDate.toLocaleString();
+    await query(
+      `INSERT INTO messages (conversation_id, sender_id, content, created_at)
+       VALUES ($1, $2, $3, CURRENT_TIMESTAMP)`,
+      [
+        convId,
+        String(learnerId),
+        `Session booking request submitted for "${bookingRequest.topic}" (Scheduled: ${dateStr}).${notes ? ` Notes: ${notes}` : ""}`,
+      ]
+    ).catch((err) => console.error("Initial booking message insert error:", err));
+
+    // Notification for mentor
     await query(
       `INSERT INTO notifications (user_id, type, title, message, link)
        VALUES ($1, $2, $3, $4, $5)`,
@@ -846,39 +1327,32 @@ application.post("/api/sessions/book", async (request, response) => {
         bookingRequest.mentorId,
         "booking_received",
         "New Mentorship Booking Request",
-        `New session request for "${bookingRequest.topic}" from user ${bookingRequest.learnerId}.`,
+        `New pending session request for "${bookingRequest.topic}".`,
         "/history?view=teaching",
       ]
     ).catch(() => {});
 
-    // Asynchronously dispatch email notification if mentor has email configured
-    Promise.all([
-      query("SELECT email, name FROM users WHERE id = $1", [bookingRequest.mentorId]),
-      query("SELECT name FROM users WHERE id = $1", [bookingRequest.learnerId]),
-    ])
-      .then(([mRes, lRes]) => {
-        if (mRes.rows && mRes.rows[0]) {
-          emailService.notifyBookingEvent({
-            recipientEmail: mRes.rows[0].email,
-            recipientName: mRes.rows[0].name,
-            topic: bookingRequest.topic,
-            scheduledAt: bookingRequest.scheduledAt,
-            status: "queued",
-            partnerName: lRes.rows[0]?.name || "A learner",
-          }).catch(() => {});
-        }
-      })
-      .catch(() => {});
+    // Notification for learner
+    await query(
+      `INSERT INTO notifications (user_id, type, title, message, link)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        bookingRequest.learnerId,
+        "booking_created",
+        "Session Booking Pending",
+        `Your booking request for "${bookingRequest.topic}" is awaiting teacher acceptance.`,
+        "/history?view=learning",
+      ]
+    ).catch(() => {});
 
-    // Step 3: Enqueue in FIFO Queue to maintain pipeline processing order (DSA Feature)
     bookingQueue.enqueue(bookingRequest);
-
-    // Step 4: Connect learner and mentor in the Adjacency Graph (DSA Feature)
     mentorGraph.addEdge(bookingRequest.learnerId, bookingRequest.mentorId, 1, "mentorship", true);
 
     return response.status(201).json({
-      message: "Session booking request saved to database and enqueued successfully.",
+      success: true,
+      message: "Session booking request saved to database and coordination conversation opened.",
       booking: bookingRequest,
+      conversationId: convId,
       queuePosition: bookingQueue.size(),
     });
   } catch (error) {
@@ -887,6 +1361,198 @@ application.post("/api/sessions/book", async (request, response) => {
       error: "An internal server error occurred while processing the booking request.",
       details: error.message,
     });
+  }
+});
+
+/**
+ * ENDPOINT: POST /api/sessions/:id/accept
+ * Teacher accepts a pending session booking.
+ */
+application.post("/api/sessions/:id/accept", authenticateToken, async (request, response) => {
+  try {
+    const sessionId = request.params.id;
+    const userId = request.user.userId;
+
+    const sessRes = await query("SELECT * FROM session_bookings WHERE id = $1", [sessionId]);
+    if (sessRes.rows.length === 0) {
+      return response.status(404).json({ error: "Session booking not found." });
+    }
+
+    const session = sessRes.rows[0];
+    if (session.mentor_id !== userId) {
+      return response.status(403).json({ error: "Only the designated teacher can accept this session booking." });
+    }
+
+    if (session.status !== "pending" && session.status !== "queued") {
+      return response.status(400).json({
+        error: `Cannot accept session with current status "${session.status}".`,
+      });
+    }
+
+    await query("UPDATE session_bookings SET status = 'accepted' WHERE id = $1", [sessionId]);
+
+    // Notify learner
+    await query(
+      `INSERT INTO notifications (user_id, type, title, message, link)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        session.learner_id,
+        "booking_accepted",
+        "Session Accepted!",
+        `Your session booking for "${session.topic}" was accepted by the teacher.`,
+        "/history?view=learning",
+      ]
+    ).catch(() => {});
+
+    // Post to linked conversation
+    if (session.conversation_id) {
+      await query(
+        `INSERT INTO messages (conversation_id, sender_id, content, created_at)
+         VALUES ($1, $2, $3, CURRENT_TIMESTAMP)`,
+        [
+          session.conversation_id,
+          userId,
+          `Session accepted! Looking forward to our session on "${session.topic}".`,
+        ]
+      ).catch((err) => console.error("Accept message error:", err));
+    }
+
+    return response.status(200).json({
+      message: "Session booking accepted successfully.",
+      status: "accepted",
+    });
+  } catch (error) {
+    console.error("Error accepting session booking:", error);
+    return response.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * ENDPOINT: POST /api/sessions/:id/decline
+ * Teacher declines a pending session booking.
+ */
+application.post("/api/sessions/:id/decline", authenticateToken, async (request, response) => {
+  try {
+    const sessionId = request.params.id;
+    const userId = request.user.userId;
+    const { reason } = request.body;
+
+    const sessRes = await query("SELECT * FROM session_bookings WHERE id = $1", [sessionId]);
+    if (sessRes.rows.length === 0) {
+      return response.status(404).json({ error: "Session booking not found." });
+    }
+
+    const session = sessRes.rows[0];
+    if (session.mentor_id !== userId) {
+      return response.status(403).json({ error: "Only the designated teacher can decline this session booking." });
+    }
+
+    if (session.status !== "pending" && session.status !== "queued") {
+      return response.status(400).json({
+        error: `Cannot decline session with current status "${session.status}".`,
+      });
+    }
+
+    const declineReason = reason && typeof reason === "string" && reason.trim() !== ""
+      ? reason.trim()
+      : "Teacher unavailable at requested time.";
+
+    await query(
+      "UPDATE session_bookings SET status = 'declined', declined_reason = $1 WHERE id = $2",
+      [declineReason, sessionId]
+    );
+
+    // Close the linked conversation without deleting history
+    if (session.conversation_id) {
+      await query(
+        "UPDATE conversations SET is_closed = TRUE, closed_at = CURRENT_TIMESTAMP WHERE id = $1",
+        [session.conversation_id]
+      ).catch(() => {});
+
+      await query(
+        `INSERT INTO messages (conversation_id, sender_id, content, created_at)
+         VALUES ($1, $2, $3, CURRENT_TIMESTAMP)`,
+        [
+          session.conversation_id,
+          userId,
+          `Session request was declined: "${declineReason}". Coordination thread is now closed.`,
+        ]
+      ).catch((err) => console.error("Decline message error:", err));
+    }
+
+    // Notify learner
+    await query(
+      `INSERT INTO notifications (user_id, type, title, message, link)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        session.learner_id,
+        "booking_declined",
+        "Session Booking Declined",
+        `Your session for "${session.topic}" was declined: ${declineReason}`,
+        "/history?view=learning",
+      ]
+    ).catch(() => {});
+
+    return response.status(200).json({
+      message: "Session booking declined.",
+      status: "declined",
+      declinedReason: declineReason,
+    });
+  } catch (error) {
+    console.error("Error declining session booking:", error);
+    return response.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * ENDPOINT: POST /api/sessions/:id/complete
+ * Either session participant marks an accepted session as completed.
+ */
+application.post("/api/sessions/:id/complete", authenticateToken, async (request, response) => {
+  try {
+    const sessionId = request.params.id;
+    const userId = request.user.userId;
+
+    const sessRes = await query("SELECT * FROM session_bookings WHERE id = $1", [sessionId]);
+    if (sessRes.rows.length === 0) {
+      return response.status(404).json({ error: "Session booking not found." });
+    }
+
+    const session = sessRes.rows[0];
+    if (session.mentor_id !== userId && session.learner_id !== userId) {
+      return response.status(403).json({ error: "Only session participants may mark this session completed." });
+    }
+
+    if (session.status !== "accepted" && session.status !== "confirmed") {
+      return response.status(400).json({
+        error: `Only accepted or confirmed sessions can be marked completed (current status: "${session.status}").`,
+      });
+    }
+
+    await query("UPDATE session_bookings SET status = 'completed' WHERE id = $1", [sessionId]);
+
+    // Notify learner to leave feedback
+    await query(
+      `INSERT INTO notifications (user_id, type, title, message, link)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        session.learner_id,
+        "session_completed",
+        "Session Completed - Leave Feedback",
+        `Your session on "${session.topic}" has concluded. You can now leave a review!`,
+        "/history?view=learning",
+      ]
+    ).catch(() => {});
+
+    return response.status(200).json({
+      success: true,
+      message: "Session marked as completed. Feedback form is now open for learner.",
+      status: "completed",
+      booking: { id: sessionId, status: "completed" },
+    });
+  } catch (error) {
+    console.error("Error marking session completed:", error);
+    return response.status(500).json({ error: error.message });
   }
 });
 
@@ -1070,47 +1736,67 @@ application.put("/api/users/:userId/skills", async (request, response) => {
         updateVals
       );
 
-      // Fetch existing verified skills before deleting so verification badge is not lost
-      const existingVerified = await client.query(
-        `SELECT LOWER(skill_name) as lower_skill, is_verified, verified_at 
-         FROM skills 
-         WHERE user_id = $1 AND is_verified = TRUE`,
-        [targetUserId]
-      );
-      const verifiedMap = new Map();
-      for (const v of existingVerified.rows) {
-        verifiedMap.set(v.lower_skill, { is_verified: true, verified_at: v.verified_at });
+      // Step 2a: Validate all incoming skills against canonical PostgreSQL skill_catalog
+      const validatedIncomingSkills = [];
+      for (const skill of incomingSkills) {
+        const rawName = skill.skill_name || skill.skillName;
+        if (!rawName || typeof rawName !== "string" || !rawName.trim()) continue;
+
+        const validation = await validateSkillAgainstCatalog(rawName);
+        if (!validation.valid) {
+          await client.query("ROLLBACK");
+          return response.status(400).json({
+            error: validation.message,
+            suggestion: validation.suggestion || null,
+            invalidSkill: rawName,
+          });
+        }
+
+        validatedIncomingSkills.push({
+          skillName: validation.canonicalName,
+          level: skill.level || "intermediate",
+          type: skill.type === "learn" ? "learn" : "teach",
+        });
       }
 
-      // Delete existing skills for this user and insert updated list
+      // Step 2b: Query verified passing quiz records from quiz_attempts
+      // Requirement: Only verified skills returned by backend may display as verified.
+      // Must check that a passing attempt exists in quiz_attempts AND was not forfeited.
+      const passingAttempts = await client.query(
+        `SELECT LOWER(skill_name) as lower_skill, MAX(created_at) as passed_at
+         FROM quiz_attempts
+         WHERE user_id = $1 AND passed = TRUE AND forfeited IS NOT TRUE AND answers_revealed IS NOT TRUE
+         GROUP BY LOWER(skill_name)`,
+        [targetUserId]
+      );
+      const verifiedQuizMap = new Map();
+      for (const p of passingAttempts.rows) {
+        verifiedQuizMap.set(p.lower_skill, p.passed_at);
+      }
+
+      // Delete existing skills for this user and insert validated skills list
       await client.query(`DELETE FROM skills WHERE user_id = $1`, [targetUserId]);
 
       const teachSkillNames = [];
-      for (const skill of incomingSkills) {
-        const skillName = skill.skill_name || skill.skillName;
-        const level = skill.level || "beginner";
-        const type = skill.type || "teach";
+      for (const skill of validatedIncomingSkills) {
+        const lowerName = skill.skillName.toLowerCase();
+        // Server-side verification enforcement: user cannot spoof is_verified
+        const isVerified = skill.type === "teach" && verifiedQuizMap.has(lowerName);
+        const verifiedAt = isVerified ? (verifiedQuizMap.get(lowerName) || new Date()) : null;
 
-        if (skillName) {
-          const lowerName = skillName.trim().toLowerCase();
-          const isVerified = type === "teach" && (Boolean(skill.is_verified) || verifiedMap.has(lowerName));
-          const verifiedAt = isVerified
-            ? (verifiedMap.get(lowerName)?.verified_at || new Date())
-            : null;
+        await client.query(
+          `INSERT INTO skills (user_id, skill_name, level, type, is_verified, verified_at, forfeited)
+           VALUES ($1, $2, $3, $4, $5, $6, FALSE)
+           ON CONFLICT ON CONSTRAINT uq_user_skill_type DO UPDATE SET
+             level = EXCLUDED.level,
+             is_verified = EXCLUDED.is_verified,
+             verified_at = EXCLUDED.verified_at,
+             forfeited = FALSE`,
+          [targetUserId, skill.skillName, skill.level, skill.type, isVerified, verifiedAt]
+        );
 
-          await client.query(
-            `INSERT INTO skills (user_id, skill_name, level, type, is_verified, verified_at)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT ON CONSTRAINT uq_user_skill_type DO UPDATE SET
-               level = EXCLUDED.level,
-               is_verified = EXCLUDED.is_verified,
-               verified_at = EXCLUDED.verified_at`,
-            [targetUserId, skillName, level, type, isVerified, verifiedAt]
-          );
-
-          if (type === "teach") {
-            teachSkillNames.push(skillName);
-          }
+        if (skill.type === "teach") {
+          teachSkillNames.push(skill.skillName);
         }
       }
 
@@ -1660,15 +2346,14 @@ application.get("/api/users/:userId/history", async (request, response) => {
       });
     }
 
-    let filterClause = "WHERE (sb.learner_id = $1 OR sb.mentor_id = $1)";
-    if (roleFilter === "learner") {
-      filterClause = "WHERE sb.learner_id = $1";
-    } else if (roleFilter === "teacher") {
-      filterClause = "WHERE sb.mentor_id = $1";
-    }
+    // Strictly separate learner and teacher queries: no combined list ever appears
+    const requestedRole = (roleFilter || request.headers["x-active-mode"] || "").toLowerCase();
+    const isTeacherHistory = requestedRole === "teacher" || requestedRole === "teach";
+    const filterClause = isTeacherHistory ? "WHERE sb.mentor_id = $1" : "WHERE sb.learner_id = $1";
 
     const dbResult = await query(
       `SELECT sb.id, sb.mentor_id, sb.learner_id, sb.scheduled_at, sb.status, sb.topic, sb.notes,
+              sb.declined_reason, sb.conversation_id,
               json_build_object('id', m.id, 'name', m.name, 'role', m.role, 'avatar_url', m.avatar_url, 'is_demo', m.is_demo) as mentor,
               json_build_object('id', l.id, 'name', l.name, 'role', l.role, 'avatar_url', l.avatar_url, 'is_demo', l.is_demo) as learner,
               CASE WHEN r.id IS NOT NULL THEN
@@ -1684,13 +2369,12 @@ application.get("/api/users/:userId/history", async (request, response) => {
     );
 
     const rows = dbResult.rows || [];
-    const learningSessions = rows.filter((s) => s.learner_id === targetUserId);
-    const teachingSessions = rows.filter((s) => s.mentor_id === targetUserId);
 
     return response.status(200).json({
+      role: isTeacherHistory ? "teacher" : "learner",
       sessions: rows,
-      learningSessions,
-      teachingSessions,
+      learningSessions: isTeacherHistory ? [] : rows,
+      teachingSessions: isTeacherHistory ? rows : [],
       source: "postgresql",
     });
   } catch (error) {
@@ -1705,15 +2389,30 @@ application.get("/api/users/:userId/history", async (request, response) => {
 /**
  * ENDPOINT 7: POST /api/reviews
  *
- * Submits rating and review for a session, updating PostgreSQL and mentor reputation.
+ * Real session feedback workflow:
+ * - Requires JWT authentication.
+ * - Enforces: feedback form only shown to learner after session is marked completed.
+ * - Enforces: exactly one review per completed booking in API and database.
+ * - Stores rating (1-5) and feedback comment in PostgreSQL.
+ * - Updates teacher reputation via custom HashTable & bounded Bayesian damped score.
  */
-application.post("/api/reviews", async (request, response) => {
+application.post("/api/reviews", authenticateToken, async (request, response) => {
   try {
-    const { sessionId, rating, comment } = request.body;
+    const userId = request.user.userId;
+    const sessionId = request.body.sessionId || request.body.session_id;
+    const rating = request.body.rating;
+    const comment = request.body.comment || request.body.review_text;
 
-    if (!sessionId || !rating) {
+    if (!sessionId || rating === undefined || rating === null) {
       return response.status(400).json({
         error: "Missing required review fields. Please provide sessionId and rating.",
+      });
+    }
+
+    const numRating = parseInt(rating, 10);
+    if (isNaN(numRating) || numRating < 1 || numRating > 5) {
+      return response.status(400).json({
+        error: "Rating must be an integer between 1 and 5.",
       });
     }
 
@@ -1726,11 +2425,8 @@ application.post("/api/reviews", async (request, response) => {
       });
     }
 
-    const reviewId = `rev_${Date.now()}`;
-
     // Find session in PostgreSQL
-    const sessRes = await query(`SELECT * FROM session_bookings WHERE id = $1`, [sessionId]);
-
+    const sessRes = await query("SELECT * FROM session_bookings WHERE id = $1", [sessionId]);
     if (sessRes.rows.length === 0) {
       return response.status(404).json({
         error: `Session "${sessionId}" was not found in the database.`,
@@ -1739,36 +2435,69 @@ application.post("/api/reviews", async (request, response) => {
 
     const sess = sessRes.rows[0];
 
+    // Enforce: only learner who attended may submit feedback
+    if (sess.learner_id !== userId) {
+      return response.status(403).json({
+        error: "Only the learner who attended this session may submit a review.",
+      });
+    }
+
+    // Enforce: session MUST be completed
+    if (sess.status !== "completed") {
+      return response.status(400).json({
+        error: `Reviews can only be submitted for completed sessions. Current status is "${sess.status}".`,
+      });
+    }
+
+    // Enforce: exactly one review per completed booking
+    const existingReview = await query("SELECT id FROM reviews WHERE session_id = $1", [sessionId]);
+    if (existingReview.rows.length > 0) {
+      return response.status(409).json({
+        error: "A review has already been submitted for this session. Duplicate reviews are not permitted.",
+      });
+    }
+
+    const reviewId = `rev_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+
     // Insert review into PostgreSQL
     await query(
-      `INSERT INTO reviews (id, session_id, reviewer_id, mentor_id, rating, comment)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (id) DO NOTHING`,
-      [reviewId, sessionId, sess.learner_id, sess.mentor_id, parseInt(rating, 10), comment || ""]
+      `INSERT INTO reviews (id, session_id, reviewer_id, mentor_id, rating, comment, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)`,
+      [reviewId, sessionId, userId, sess.mentor_id, numRating, comment || ""]
     );
 
-    // Update session status to completed
-    await query(`UPDATE session_bookings SET status = 'completed' WHERE id = $1`, [sessionId]);
-
-    // Recalculate mentor reputation score
-    await query(
-      `UPDATE users SET reputation_score = (
-         SELECT ROUND(AVG(rating), 2) FROM reviews WHERE mentor_id = $1
-       ) WHERE id = $1`,
-      [sess.mentor_id]
+    // Update teacher reputation using bounded Bayesian prior via ReputationEngine
+    const updatedReputation = await reputationEngine.updateTeacherReputationFromDatabase(
+      sess.mentor_id,
+      query
     );
 
     // Update relationship edge weight in the Adjacency Graph (DSA Feature)
-    mentorGraph.updateEdgeWeight(sess.learner_id, sess.mentor_id, parseInt(rating, 10), true);
+    mentorGraph.updateEdgeWeight(sess.learner_id, sess.mentor_id, numRating, true);
+
+    // Notify mentor in-app
+    await query(
+      `INSERT INTO notifications (user_id, type, title, message, link)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        sess.mentor_id,
+        "review_received",
+        "New Session Review Received",
+        `A learner submitted a ${numRating}-star review for your session.`,
+        "/history?view=teaching",
+      ]
+    ).catch(() => {});
 
     return response.status(201).json({
-      message: "Session review recorded successfully in PostgreSQL! Mentor reputation score updated.",
+      success: true,
+      message: "Session review recorded successfully! Teacher reputation updated.",
       review: {
         id: reviewId,
         sessionId,
-        rating: parseInt(rating, 10),
+        rating: numRating,
         comment: comment || "",
       },
+      updatedReputation,
     });
   } catch (error) {
     console.error("Error submitting review:", error);
@@ -1803,6 +2532,21 @@ application.get("/api/recommendations/:userId", async (request, response) => {
     let candidateMentors = [];
     let learnerDesiredSkills = [];
 
+    // Requirement: Show recommendations only in Learner mode
+    if (conn.reachable) {
+      const userRes = await query("SELECT active_mode, role FROM users WHERE id = $1", [targetUserId]);
+      const userRow = userRes.rows[0];
+      const effectiveMode = (request.headers["x-active-mode"] || (userRow && userRow.active_mode) || "learner").toLowerCase();
+      if (effectiveMode !== "learner") {
+        return response.status(200).json({
+          recommendations: [],
+          mode: "teacher",
+          message: "Mentor recommendations are reserved for Learner mode. Switch to Learner mode to discover mentors.",
+          totalCandidatesEvaluated: 0,
+        });
+      }
+    }
+
     if (conn.reachable) {
       // 1. Fetch learner's desired skills (type = 'learn')
       const learnerSkillsRes = await query(
@@ -1811,34 +2555,58 @@ application.get("/api/recommendations/:userId", async (request, response) => {
       );
       learnerDesiredSkills = learnerSkillsRes.rows || [];
 
-      // 2. Fetch candidate mentors excluding the requesting learner
+      // If learner has no desired skills listed, return honest empty state
+      if (learnerDesiredSkills.length === 0) {
+        return response.status(200).json({
+          recommendations: [],
+          desiredSkills: [],
+          message: "Add skills you want to learn in your Profile to receive tailored mentor recommendations.",
+          totalCandidatesEvaluated: 0,
+          algorithm: "Max-Heap Priority Queue with Graph BFS Proximity",
+        });
+      }
+
+      const desiredLowerNames = learnerDesiredSkills.map((s) => s.skill_name.trim().toLowerCase());
+
+      // 2. Fetch only qualified mentors who actually teach at least one of the learner's desired skills
+      // Exclude the learner themselves ($1), and exclude generic learners or profiles with no matching teachable skills
       const dbResult = await query(
         `SELECT u.id, u.name, u.role, u.bio, u.reputation_score, u.avatar_url, u.is_demo,
-                COALESCE(array_agg(s.skill_name) FILTER (WHERE s.type = 'teach' AND s.skill_name IS NOT NULL), '{}') as skills,
+                COALESCE(array_agg(DISTINCT s.skill_name) FILTER (WHERE s.type = 'teach' AND s.skill_name IS NOT NULL), '{}') as skills,
                 COALESCE(
-                  json_agg(json_build_object('skill_name', s.skill_name, 'level', s.level, 'type', s.type, 'is_verified', COALESCE(s.is_verified, FALSE)))
-                  FILTER (WHERE s.type = 'teach' AND s.skill_name IS NOT NULL), '[]'
+                  json_agg(
+                    DISTINCT jsonb_build_object(
+                      'skill_name', s.skill_name,
+                      'level', s.level,
+                      'type', s.type,
+                      'is_verified', COALESCE(s.is_verified, FALSE)
+                    )
+                  ) FILTER (WHERE s.type = 'teach' AND s.skill_name IS NOT NULL),
+                  '[]'::json
                 ) as skill_entries
          FROM users u
-         LEFT JOIN skills s ON u.id = s.user_id
+         JOIN skills s ON u.id = s.user_id AND s.type = 'teach'
          WHERE u.id <> $1
+           AND LOWER(s.skill_name) = ANY($2)
          GROUP BY u.id, u.name, u.role, u.bio, u.reputation_score, u.avatar_url, u.is_demo
          ORDER BY u.reputation_score DESC`,
-        [targetUserId]
+        [targetUserId, desiredLowerNames]
       );
 
       candidateMentors = dbResult.rows || [];
-    }
 
-    // Complement candidates with seed catalog mentors if database has few candidates or is offline
-    if (candidateMentors.length < 6) {
-      const existingIds = new Set(candidateMentors.map((m) => m.id || m.userId));
-      existingIds.add(targetUserId);
-      for (const su of seedUsers) {
-        if (!existingIds.has(su.userId)) {
-          candidateMentors.push(su);
-          existingIds.add(su.userId);
-        }
+      // Dynamically sync Graph edges from PostgreSQL connections and sessions
+      const connectionsDb = await query(
+        `SELECT user_id, peer_id FROM connections WHERE status = 'connected'`
+      );
+      for (const edge of connectionsDb.rows) {
+        mentorGraph.addEdge(edge.user_id, edge.peer_id, 5.0, true);
+      }
+      const completedSessionsDb = await query(
+        `SELECT learner_id, mentor_id FROM session_bookings WHERE status = 'completed'`
+      );
+      for (const sess of completedSessionsDb.rows) {
+        mentorGraph.addEdge(sess.learner_id, sess.mentor_id, 4.5, true);
       }
     }
 
@@ -1905,9 +2673,16 @@ application.get("/api/recommendations/:userId", async (request, response) => {
       breakdown: item.breakdown,
     }));
 
+    const emptyMessage = candidateMentors.length === 0
+      ? `No qualified mentors are currently teaching your requested skills (${learnerDesiredSkills.map(s => s.skill_name).join(', ')}). You can submit a course request to attract mentors!`
+      : null;
+
     return response.status(200).json({
       recommendations: rankedRecommendations,
       totalCandidatesEvaluated: candidateMentors.length,
+      desiredSkills: learnerDesiredSkills.map(s => s.skill_name),
+      message: emptyMessage,
+      scoringFormula: "Skill Match (0-40 pts) + Reputation Rating (0-40 pts) + Network Proximity (0-20 pts) = 100 max points (clamped 0-100)",
       algorithm: "Max-Heap Priority Queue with Graph BFS Proximity",
     });
   } catch (error) {
@@ -2004,7 +2779,6 @@ application.post("/api/course-requests", authenticateToken, async (request, resp
     }
 
     const cleanTitle = title.trim();
-    const cleanCategory = category && typeof category === "string" ? category.trim() : "General";
     const cleanDesc = description && typeof description === "string" ? description.trim() : "";
 
     const conn = await checkConnection();
@@ -2014,45 +2788,29 @@ application.post("/api/course-requests", authenticateToken, async (request, resp
       });
     }
 
-    // Check if an existing mentor already teaches this skill in PostgreSQL or active catalog
-    const existingSkillDb = await query(
-      `SELECT s.skill_name, u.name as mentor_name
-       FROM skills s
-       JOIN users u ON s.user_id = u.id
-       WHERE s.type = 'teach' AND LOWER(s.skill_name) = LOWER($1)
-       LIMIT 1`,
-      [cleanTitle]
-    );
-
-    const catalogMentors =
-      typeof skillHashTable !== "undefined" && typeof skillHashTable.lookup === "function"
-        ? skillHashTable.lookup(cleanTitle)
-        : [];
-
-    if (existingSkillDb.rows.length > 0 || (catalogMentors && catalogMentors.length > 0)) {
-      const activeMentorName =
-        existingSkillDb.rows.length > 0
-          ? existingSkillDb.rows[0].mentor_name
-          : catalogMentors[0].name;
-
+    // Validate title against canonical PostgreSQL skill_catalog
+    const validation = await validateSkillAgainstCatalog(cleanTitle);
+    if (!validation.valid) {
       return response.status(400).json({
-        error: `The skill "${cleanTitle}" is already available on SkillSwap! Mentor ${activeMentorName} is currently teaching it. You can search mentors and book a session directly.`,
-        alreadyAvailable: true,
-        skillName: cleanTitle,
-        mentorName: activeMentorName,
+        error: validation.message,
+        suggestion: validation.suggestion || null,
+        invalidSkill: cleanTitle,
       });
     }
+
+    const canonicalTitle = validation.canonicalName;
+    const canonicalCategory = validation.category || (category && typeof category === "string" ? category.trim() : "General");
 
     // Check if the learner already has an active open request for this skill
     const duplicateRequest = await query(
       `SELECT id FROM course_requests
        WHERE requester_id = $1 AND LOWER(title) = LOWER($2) AND status = 'open'`,
-      [requesterId, cleanTitle]
+      [requesterId, canonicalTitle]
     );
 
     if (duplicateRequest.rows.length > 0) {
       return response.status(409).json({
-        error: `You already have an open course request for "${cleanTitle}".`,
+        error: `You already have an open course request for "${canonicalTitle}".`,
       });
     }
 
@@ -2061,11 +2819,11 @@ application.post("/api/course-requests", authenticateToken, async (request, resp
       `INSERT INTO course_requests (requester_id, title, description, category, status, votes_count)
        VALUES ($1, $2, $3, $4, 'open', 1)
        RETURNING id, requester_id, title, description, category, status, votes_count, created_at, updated_at`,
-      [requesterId, cleanTitle, cleanDesc, cleanCategory]
+      [requesterId, canonicalTitle, cleanDesc, canonicalCategory]
     );
 
     return response.status(201).json({
-      message: `Course request for "${cleanTitle}" created successfully. You will be notified as soon as a mentor offers to teach it.`,
+      message: `Course request for "${canonicalTitle}" created successfully. You will be notified as soon as an eligible teacher responds.`,
       courseRequest: insertRes.rows[0],
     });
   } catch (error) {
@@ -2217,6 +2975,99 @@ application.get("/api/course-requests/:id", async (request, response) => {
     console.error("Error retrieving course request:", error);
     return response.status(500).json({
       error: "An internal server error occurred while retrieving course request.",
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * ENDPOINT: POST /api/course-requests/:id/respond
+ * Allows an eligible teacher to offer to teach an open course request.
+ */
+application.post("/api/course-requests/:id/respond", authenticateToken, async (request, response) => {
+  try {
+    const teacherId = request.user.userId;
+    const requestId = parseInt(request.params.id, 10);
+    const { message } = request.body;
+
+    if (isNaN(requestId)) {
+      return response.status(400).json({ error: "Invalid course request ID." });
+    }
+
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable." });
+    }
+
+    const teacherRes = await query(
+      `SELECT id, name, role, active_mode FROM users WHERE id = $1`,
+      [teacherId]
+    );
+    if (teacherRes.rows.length === 0) {
+      return response.status(404).json({ error: "Teacher user not found." });
+    }
+    const teacher = teacherRes.rows[0];
+
+    const reqRes = await query(
+      `SELECT cr.id, cr.requester_id, cr.title, cr.category, cr.status, u.name as requester_name
+       FROM course_requests cr
+       JOIN users u ON cr.requester_id = u.id
+       WHERE cr.id = $1`,
+      [requestId]
+    );
+    if (reqRes.rows.length === 0) {
+      return response.status(404).json({ error: "Course request not found." });
+    }
+    const courseReq = reqRes.rows[0];
+
+    if (courseReq.requester_id === teacherId) {
+      return response.status(400).json({ error: "You cannot respond to your own course request." });
+    }
+
+    // Check if teacher has this skill listed as teachable
+    const teachesSkillRes = await query(
+      `SELECT id, is_verified FROM skills
+       WHERE user_id = $1 AND LOWER(skill_name) = LOWER($2) AND type = 'teach'`,
+      [teacherId, courseReq.title]
+    );
+
+    // If teacher doesn't have it listed, automatically add as teachable
+    if (teachesSkillRes.rows.length === 0) {
+      await query(
+        `INSERT INTO skills (user_id, skill_name, level, type, is_verified)
+         VALUES ($1, $2, 'intermediate', 'teach', FALSE)
+         ON CONFLICT ON CONSTRAINT uq_user_skill_type DO NOTHING`,
+        [teacherId, courseReq.title]
+      );
+    }
+
+    // Update request to fulfilled
+    await query(
+      `UPDATE course_requests SET status = 'fulfilled', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+      [requestId]
+    );
+
+    // Create notification for learner
+    await query(
+      `INSERT INTO notifications (user_id, type, title, message, link)
+       VALUES ($1, 'course_request_matched', $2, $3, $4)`,
+      [
+        courseReq.requester_id,
+        `Teacher Found for: ${courseReq.title}`,
+        `${teacher.name} has offered to teach your requested skill "${courseReq.title}"! ${message ? `Message: "${message}"` : "You can message them or book a session directly."}`,
+        `/messages?userId=${teacherId}`,
+      ]
+    );
+
+    return response.status(200).json({
+      message: `You have offered to teach "${courseReq.title}"! The requesting learner has been notified.`,
+      status: "fulfilled",
+      requestId,
+    });
+  } catch (error) {
+    console.error("Error responding to course request:", error);
+    return response.status(500).json({
+      error: "An internal server error occurred while responding to course request.",
       details: error.message,
     });
   }
@@ -2449,7 +3300,8 @@ application.get("/api/conversations", authenticateToken, async (request, respons
     }
 
     const convRes = await query(
-      `SELECT c.id, c.user1_id, c.user2_id, c.last_message_at, c.created_at,
+      `SELECT c.id, c.user1_id, c.user2_id, c.session_id, c.is_closed, c.closed_at, c.last_message_at, c.created_at,
+              sb.status as session_status, sb.topic as session_skill,
               json_build_object(
                 'id', peer.id,
                 'name', peer.name,
@@ -2475,6 +3327,7 @@ application.get("/api/conversations", authenticateToken, async (request, respons
               ) as unread_count
        FROM conversations c
        JOIN users peer ON (CASE WHEN c.user1_id = $1 THEN c.user2_id ELSE c.user1_id END) = peer.id
+       LEFT JOIN session_bookings sb ON c.session_id = sb.id
        WHERE c.user1_id = $1 OR c.user2_id = $1
        ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC`,
       [userId]
@@ -2600,9 +3453,11 @@ application.get("/api/conversations/:id/messages", authenticateToken, async (req
       });
     }
 
-    // Fetch messages
+    // Fetch messages with attachments, voice notes, and call logs
     const msgRes = await query(
       `SELECT m.id, m.conversation_id, m.sender_id, m.content, m.is_read, m.created_at,
+              m.message_type, m.attachment_filename, m.attachment_original_name,
+              m.attachment_mimetype, m.attachment_size, m.duration_seconds, m.call_action,
               u.name as sender_name, u.avatar_url as sender_avatar
        FROM messages m
        JOIN users u ON m.sender_id = u.id
@@ -2652,7 +3507,7 @@ application.post("/api/conversations/:id/messages", authenticateToken, async (re
 
     // Ownership check: must be a participant
     const convCheck = await query(
-      `SELECT id, user1_id, user2_id FROM conversations WHERE id = $1`,
+      `SELECT id, user1_id, user2_id, is_closed FROM conversations WHERE id = $1`,
       [convId]
     );
 
@@ -2664,6 +3519,12 @@ application.post("/api/conversations/:id/messages", authenticateToken, async (re
     if (conv.user1_id !== userId && conv.user2_id !== userId) {
       return response.status(403).json({
         error: "Forbidden: You are not authorized to send messages in this conversation.",
+      });
+    }
+
+    if (conv.is_closed) {
+      return response.status(400).json({
+        error: "This session coordination conversation is closed. New messages cannot be sent.",
       });
     }
 
@@ -2869,345 +3730,1022 @@ application.get("/api/mentor-listings/:userId", async (request, response) => {
 });
 
 // ----------------------------------------------------------------------------
-// SKILL VERIFICATION QUIZ ENDPOINTS (PostgreSQL-backed & JWT-authorized)
+// TEACHER DOCUMENT VERIFICATION ENDPOINTS (PostgreSQL-backed & JWT-authorized)
 // ----------------------------------------------------------------------------
 
 /**
- * ENDPOINT: GET /api/quizzes/supported-skills
- * Returns the list of skills that currently offer a curated qualification quiz.
+ * ENDPOINT: POST /api/teacher-verification/apply
+ *
+ * Dedicated teacher verification application submission:
+ * - Requires JWT authentication.
+ * - Accepts resume (PDF/DOCX), certificate (PDF/JPG/PNG), or both.
+ * - Requires at least one document.
+ * - Validates file types and sizes (<= 5MB).
+ * - Executes rules-based resume pre-check (skills, sections, dates) via ResumePreChecker.
+ * - Runs VerificationDecisionTree to classify document choice and routing tier.
+ * - Persists application metadata, document references, and precheck results in PostgreSQL.
+ * - Notifies applicant that review typically takes 2 business days.
+ * - Explicit notice: Pre-check is preliminary feedback only; final review is human-adjudicated.
  */
-application.get("/api/quizzes/supported-skills", (request, response) => {
-  const supported = getSupportedSkills();
+application.post(
+  "/api/teacher-verification/apply",
+  authenticateToken,
+  (request, response, next) => {
+    documentUpload.fields([
+      { name: "resume", maxCount: 1 },
+      { name: "certificate", maxCount: 1 },
+    ])(request, response, (err) => {
+      if (err instanceof multer.MulterError) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          return response.status(400).json({ error: "File size exceeds the 5MB limit." });
+        }
+        return response.status(400).json({ error: `File upload error: ${err.message}` });
+      } else if (err) {
+        return response.status(400).json({ error: err.message });
+      }
+      next();
+    });
+  },
+  async (request, response) => {
+    try {
+      const userId = request.user.userId;
+      const { skillName, notes, resumeText } = request.body;
+
+      if (!skillName || typeof skillName !== "string" || skillName.trim() === "") {
+        return response.status(400).json({
+          error: "Skill name is required for verification.",
+        });
+      }
+
+      const cleanSkill = skillName.trim();
+      const catalogValidation = await validateSkillAgainstCatalog(cleanSkill);
+      if (!catalogValidation.valid) {
+        return response.status(400).json({
+          error: catalogValidation.message,
+          suggestion: catalogValidation.suggestion || null,
+        });
+      }
+      const canonicalSkill = catalogValidation.canonicalName;
+
+      const resumeFile = request.files && request.files["resume"] ? request.files["resume"][0] : null;
+      const certFile = request.files && request.files["certificate"] ? request.files["certificate"][0] : null;
+
+      if (!resumeFile && !certFile) {
+        return response.status(400).json({
+          error: "At least one document (resume or certificate) is required for teacher verification.",
+        });
+      }
+
+      // Strict file signature (magic byte) verification
+      if (resumeFile) {
+        const sig = validateFileSignature(resumeFile.path, resumeFile.mimetype);
+        if (!sig.valid) {
+          try { fs.unlinkSync(resumeFile.path); } catch (e) {}
+          if (certFile) try { fs.unlinkSync(certFile.path); } catch (e) {}
+          return response.status(400).json({
+            error: `Resume file validation failed: ${sig.reason}`,
+          });
+        }
+      }
+
+      if (certFile) {
+        const sig = validateFileSignature(certFile.path, certFile.mimetype);
+        if (!sig.valid) {
+          if (resumeFile) try { fs.unlinkSync(resumeFile.path); } catch (e) {}
+          try { fs.unlinkSync(certFile.path); } catch (e) {}
+          return response.status(400).json({
+            error: `Certificate file validation failed: ${sig.reason}`,
+          });
+        }
+      }
+
+      // Read text content from resume for precheck if possible
+      let textForPrecheck = (resumeText && typeof resumeText === "string") ? resumeText.trim() : "";
+      if (!textForPrecheck && resumeFile) {
+        try {
+          const buf = fs.readFileSync(resumeFile.path);
+          textForPrecheck = buf.toString("latin1").replace(/[^\x20-\x7E\n\r\t]/g, " ");
+        } catch (readErr) {
+          textForPrecheck = "";
+        }
+      }
+
+      // Execute rules-based precheck via ResumePreChecker
+      const precheckDiagnostic = ResumePreChecker.analyze(textForPrecheck, canonicalSkill);
+
+      // Evaluate document choice and review tier via VerificationDecisionTree
+      const decisionEvaluation = verificationDecisionTree.evaluate({
+        hasResume: Boolean(resumeFile),
+        hasCertificate: Boolean(certFile),
+        resumeFormatValid: resumeFile ? [".pdf", ".docx"].includes(path.extname(resumeFile.originalname).toLowerCase()) : true,
+        certificateFormatValid: certFile ? [".pdf", ".jpg", ".jpeg", ".png"].includes(path.extname(certFile.originalname).toLowerCase()) : true,
+        skillKeywordMatches: precheckDiagnostic.matchedKeywords.length,
+        hasStandardSections: precheckDiagnostic.detectedSections.length >= 2,
+        hasDateAnomalies: precheckDiagnostic.dateAnomalies.length > 0,
+      });
+
+      const appId = `tva_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const combinedPrecheck = {
+        diagnostic: precheckDiagnostic,
+        decisionTree: decisionEvaluation,
+        preliminaryNotice: "Preliminary automated check assists applicant and reviewer. Final decision is adjudicated by human reviewers. Review typically takes 2 business days.",
+      };
+
+      const insertRes = await query(
+        `INSERT INTO teacher_verification_applications (
+           id, user_id, skill_name, status,
+           resume_filename, resume_original_name, resume_mimetype, resume_size,
+           certificate_filename, certificate_original_name, certificate_mimetype, certificate_size,
+           precheck_results, created_at, updated_at
+         ) VALUES ($1, $2, $3, 'submitted', $4, $5, $6, $7, $8, $9, $10, $11, $12, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         RETURNING *`,
+        [
+          appId,
+          userId,
+          canonicalSkill,
+          resumeFile ? resumeFile.filename : null,
+          resumeFile ? resumeFile.originalname : null,
+          resumeFile ? resumeFile.mimetype : null,
+          resumeFile ? resumeFile.size : null,
+          certFile ? certFile.filename : null,
+          certFile ? certFile.originalname : null,
+          certFile ? certFile.mimetype : null,
+          certFile ? certFile.size : null,
+          JSON.stringify(combinedPrecheck),
+        ]
+      );
+
+      // In-app notification for the applicant
+      await query(
+        `INSERT INTO notifications (user_id, type, title, message, link)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          userId,
+          "verification_submitted",
+          "Verification Application Submitted",
+          `Your verification application for "${canonicalSkill}" has been submitted. Review typically takes 2 business days.`,
+          "/verification",
+        ]
+      ).catch(() => {});
+
+      return response.status(201).json({
+        message: "Application submitted successfully. Review typically takes 2 business days.",
+        application: insertRes.rows[0],
+        precheck: combinedPrecheck,
+        estimatedReviewTime: "Typically 2 business days",
+      });
+    } catch (error) {
+      console.error("Error submitting teacher verification application:", error);
+      return response.status(500).json({
+        error: "An error occurred while submitting teacher verification application.",
+        details: error.message,
+      });
+    }
+  }
+);
+
+/**
+ * ENDPOINT: GET /api/teacher-verification/my-applications
+ * Returns all verification applications submitted by the authenticated user.
+ */
+application.get(
+  "/api/teacher-verification/my-applications",
+  authenticateToken,
+  async (request, response) => {
+    try {
+      const userId = request.user.userId;
+      const res = await query(
+        `SELECT id, user_id, skill_name, status,
+                resume_original_name, resume_size,
+                certificate_original_name, certificate_size,
+                precheck_results, reviewer_notes, rejection_reason, reviewed_at, created_at, updated_at
+         FROM teacher_verification_applications
+         WHERE user_id = $1
+         ORDER BY created_at DESC`,
+        [userId]
+      );
+
+      // Also retrieve verified skills
+      const verifiedSkillsRes = await query(
+        `SELECT id, skill_name, level, is_verified, verified_at
+         FROM skills
+         WHERE user_id = $1 AND is_verified = TRUE AND type = 'teach'
+         ORDER BY verified_at DESC`,
+        [userId]
+      );
+
+      return response.status(200).json({
+        applications: res.rows || [],
+        verifiedSkills: verifiedSkillsRes.rows || [],
+      });
+    } catch (error) {
+      console.error("Error retrieving user verification applications:", error);
+      return response.status(500).json({ error: error.message });
+    }
+  }
+);
+
+/**
+ * ENDPOINT: GET /api/teacher-verification/documents/:appId/:docType
+ *
+ * Secure document retrieval:
+ * - Requires JWT authentication.
+ * - Authorized ONLY for the applicant or designated reviewers.
+ * - Serves requested document stream securely with inline Content-Disposition.
+ */
+/**
+ * ENDPOINT: GET /api/teacher-verification/documents/:appId/:docType
+ *
+ * Secure document retrieval:
+ * - Requires JWT authentication.
+ * - Authorized ONLY for the applicant or the sole reviewer (kailashsampath15@gmail.com).
+ * - Serves requested document stream securely with inline Content-Disposition.
+ */
+application.get(
+  "/api/teacher-verification/documents/:appId/:docType",
+  authenticateToken,
+  async (request, response) => {
+    try {
+      const userId = request.user.userId;
+      const { appId, docType } = request.params;
+
+      if (docType !== "resume" && docType !== "certificate") {
+        return response.status(400).json({ error: "Invalid document type. Must be 'resume' or 'certificate'." });
+      }
+
+      const appRes = await query(
+        "SELECT * FROM teacher_verification_applications WHERE id = $1",
+        [appId]
+      );
+
+      if (appRes.rows.length === 0) {
+        return response.status(404).json({ error: "Verification application not found." });
+      }
+
+      const application = appRes.rows[0];
+
+      // Check if user is sole reviewer from PostgreSQL
+      const userRes = await query("SELECT email FROM users WHERE id = $1", [userId]);
+      const dbEmail = (userRes.rows && userRes.rows[0] ? userRes.rows[0].email : "").trim().toLowerCase();
+      const isSoleReviewer = dbEmail === SOLE_REVIEWER_EMAIL;
+
+      // Authorization check: User must be applicant or sole reviewer
+      if (application.user_id !== userId && !isSoleReviewer) {
+        return response.status(403).json({
+          error: "Unauthorized. Only the applicant or the designated reviewer may access this document.",
+        });
+      }
+
+      const filename = docType === "resume" ? application.resume_filename : application.certificate_filename;
+      const originalName = docType === "resume" ? application.resume_original_name : application.certificate_original_name;
+      const mimetype = docType === "resume" ? application.resume_mimetype : application.certificate_mimetype;
+
+      if (!filename) {
+        return response.status(404).json({ error: `No ${docType} document was uploaded for this application.` });
+      }
+
+      const filePath = path.join(documentsDir, filename);
+      if (!fs.existsSync(filePath)) {
+        return response.status(404).json({ error: "Document file not found on disk." });
+      }
+
+      response.setHeader("Content-Type", mimetype || "application/octet-stream");
+      response.setHeader(
+        "Content-Disposition",
+        `inline; filename="${encodeURIComponent(originalName || filename)}"`
+      );
+
+      const fileStream = fs.createReadStream(filePath);
+      return fileStream.pipe(response);
+    } catch (error) {
+      console.error("Error serving verification document:", error);
+      return response.status(500).json({ error: error.message });
+    }
+  }
+);
+
+/**
+ * ENDPOINT: GET /api/teacher-verification/admin/queue
+ *
+ * Dedicated Sole Reviewer Queue:
+ * - Requires JWT authentication AND reviewer email check (kailashsampath15@gmail.com).
+ * - Lists all teacher-verification applications—not just pending ones.
+ * - Supports status filter, search keyword, skill filter, and pagination.
+ * - Returns status breakdown counts across the entire catalog.
+ */
+application.get(
+  "/api/teacher-verification/admin/queue",
+  authenticateToken,
+  requireReviewerAuth,
+  async (request, response) => {
+    try {
+      const { status, search, skill, page = 1, limit = 15 } = request.query;
+      const pageNum = Math.max(1, parseInt(page, 10) || 1);
+      const limitNum = Math.max(1, Math.min(100, parseInt(limit, 10) || 15));
+      const offset = (pageNum - 1) * limitNum;
+
+      const whereClauses = [];
+      const params = [];
+
+      // Status filter
+      if (status && typeof status === "string" && status.trim() !== "" && status.toLowerCase() !== "all") {
+        params.push(status.trim().toLowerCase());
+        whereClauses.push(`tva.status = $${params.length}`);
+      }
+
+      // Skill filter
+      if (skill && typeof skill === "string" && skill.trim() !== "" && skill.toLowerCase() !== "all") {
+        params.push(skill.trim().toLowerCase());
+        whereClauses.push(`LOWER(tva.skill_name) = $${params.length}`);
+      }
+
+      // Search across applicant name, email, or skill
+      if (search && typeof search === "string" && search.trim() !== "") {
+        params.push(`%${search.trim().toLowerCase()}%`);
+        const pIdx = params.length;
+        whereClauses.push(`(LOWER(u.name) LIKE $${pIdx} OR LOWER(u.email) LIKE $${pIdx} OR LOWER(tva.skill_name) LIKE $${pIdx})`);
+      }
+
+      const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+
+      // Total count matching query
+      const countRes = await query(
+        `SELECT COUNT(*) as count
+         FROM teacher_verification_applications tva
+         JOIN users u ON tva.user_id = u.id
+         ${whereSql}`,
+        params
+      );
+      const totalCount = parseInt(countRes.rows[0].count, 10);
+
+      // Paginated applications
+      const dataParams = [...params, limitNum, offset];
+      const queueRes = await query(
+        `SELECT tva.*,
+                json_build_object(
+                  'id', u.id,
+                  'name', u.name,
+                  'email', u.email,
+                  'avatar_url', u.avatar_url,
+                  'role', u.role,
+                  'reputation_score', u.reputation_score
+                ) as applicant
+         FROM teacher_verification_applications tva
+         JOIN users u ON tva.user_id = u.id
+         ${whereSql}
+         ORDER BY tva.created_at DESC
+         LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+        dataParams
+      );
+
+      // Global status breakdown counts
+      const statusCountsRes = await query(
+        `SELECT status, COUNT(*)::int as count
+         FROM teacher_verification_applications
+         GROUP BY status`
+      );
+      const statusCounts = {
+        all: 0,
+        submitted: 0,
+        under_review: 0,
+        needs_information: 0,
+        approved: 0,
+        rejected: 0,
+      };
+      (statusCountsRes.rows || []).forEach((row) => {
+        statusCounts[row.status] = row.count;
+        statusCounts.all += row.count;
+      });
+
+      return response.status(200).json({
+        applications: queueRes.rows || [],
+        queue: queueRes.rows || [],
+        totalCount,
+        count: totalCount,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(totalCount / limitNum) || 1,
+        statusCounts,
+      });
+    } catch (error) {
+      console.error("Error retrieving reviewer queue:", error);
+      return response.status(500).json({ error: error.message });
+    }
+  }
+);
+
+/**
+ * ENDPOINT: GET /api/teacher-verification/admin/application/:id
+ * Dedicated Detail View for Reviewer Portal
+ */
+application.get(
+  "/api/teacher-verification/admin/application/:id",
+  authenticateToken,
+  requireReviewerAuth,
+  async (request, response) => {
+    try {
+      const appId = request.params.id;
+      const appRes = await query(
+        `SELECT tva.*,
+                json_build_object(
+                  'id', u.id,
+                  'name', u.name,
+                  'email', u.email,
+                  'avatar_url', u.avatar_url,
+                  'role', u.role,
+                  'bio', u.bio,
+                  'reputation_score', u.reputation_score,
+                  'specialization_domain', u.specialization_domain,
+                  'created_at', u.created_at
+                ) as applicant,
+                rev.name as reviewer_name,
+                rev.email as reviewer_email
+         FROM teacher_verification_applications tva
+         JOIN users u ON tva.user_id = u.id
+         LEFT JOIN users rev ON tva.reviewer_id = rev.id
+         WHERE tva.id = $1`,
+        [appId]
+      );
+
+      if (appRes.rows.length === 0) {
+        return response.status(404).json({ error: "Verification application not found." });
+      }
+
+      return response.status(200).json({
+        application: appRes.rows[0],
+      });
+    } catch (error) {
+      return response.status(500).json({ error: error.message });
+    }
+  }
+);
+
+/**
+ * ENDPOINT: POST /api/teacher-verification/admin/application/:id/review
+ *
+ * Authorized review decision endpoint:
+ * - Strictly guarded by requireReviewerAuth (kailashsampath15@gmail.com).
+ * - Reviewer can approve, reject (with mandatory reason), or request more information (with mandatory notes).
+ * - Enforces explicit state lifecycle transitions via VerificationLifecycleManager.
+ * - On approval, marks applicant's skill as verified in PostgreSQL and qualifies them to teach.
+ * - Dispatches in-app notifications to applicant.
+ */
+application.post(
+  "/api/teacher-verification/admin/application/:id/review",
+  authenticateToken,
+  requireReviewerAuth,
+  async (request, response) => {
+    try {
+      const reviewerId = request.user.userId;
+      const appId = request.params.id;
+      const { action, reason, notes } = request.body;
+
+      if (!["approve", "reject", "request_info", "mark_under_review"].includes(action)) {
+        return response.status(400).json({
+          error: "Invalid action. Must be 'approve', 'reject', 'request_info', or 'mark_under_review'.",
+        });
+      }
+
+      const appRes = await query(
+        "SELECT * FROM teacher_verification_applications WHERE id = $1",
+        [appId]
+      );
+
+      if (appRes.rows.length === 0) {
+        return response.status(404).json({ error: "Verification application not found." });
+      }
+
+      const app = appRes.rows[0];
+
+      // Map action to target lifecycle status
+      let targetStatus;
+      if (action === "approve") targetStatus = "approved";
+      else if (action === "reject") targetStatus = "rejected";
+      else if (action === "request_info") targetStatus = "needs_information";
+      else if (action === "mark_under_review") targetStatus = "under_review";
+
+      // Validate transition using VerificationLifecycleManager
+      const transitionValidation = VerificationLifecycleManager.validateTransition(
+        app.status,
+        targetStatus
+      );
+      if (!transitionValidation.allowed) {
+        return response.status(400).json({
+          error: transitionValidation.reason,
+        });
+      }
+
+      if (action === "reject" && (!reason || typeof reason !== "string" || reason.trim() === "")) {
+        return response.status(400).json({
+          error: "A specific rejection reason is mandatory when rejecting an application.",
+        });
+      }
+
+      if (action === "request_info" && (!notes || typeof notes !== "string" || notes.trim() === "")) {
+        return response.status(400).json({
+          error: "Please specify what additional information is needed from the applicant.",
+        });
+      }
+
+      // Execute review action
+      if (action === "approve") {
+        await query(
+          `UPDATE teacher_verification_applications
+           SET status = 'approved',
+               reviewer_id = $1,
+               reviewer_notes = $2,
+               reviewed_at = CURRENT_TIMESTAMP,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $3`,
+          [reviewerId, notes || "Approved after document verification.", appId]
+        );
+
+        // Check if skill entry already exists for user
+        const existingSkill = await query(
+          "SELECT id FROM skills WHERE user_id = $1 AND LOWER(skill_name) = LOWER($2) AND type = 'teach'",
+          [app.user_id, app.skill_name]
+        );
+
+        if (existingSkill.rows.length > 0) {
+          await query(
+            "UPDATE skills SET is_verified = TRUE, verified_at = CURRENT_TIMESTAMP WHERE id = $1",
+            [existingSkill.rows[0].id]
+          );
+        } else {
+          await query(
+            `INSERT INTO skills (user_id, skill_name, level, type, is_verified, verified_at, created_at)
+             VALUES ($1, $2, 'intermediate', 'teach', TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [app.user_id, app.skill_name]
+          );
+        }
+
+        // Ensure user can_teach is true
+        await query("UPDATE users SET can_teach = TRUE WHERE id = $1", [app.user_id]);
+
+        // Notify applicant in-app
+        await query(
+          `INSERT INTO notifications (user_id, type, title, message, link)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            app.user_id,
+            "verification_approved",
+            "Verification Approved!",
+            `Your application to teach "${app.skill_name}" has been approved! You are now verified to teach this skill.`,
+            "/teacher-verification",
+          ]
+        ).catch(() => {});
+      } else if (action === "reject") {
+        await query(
+          `UPDATE teacher_verification_applications
+           SET status = 'rejected',
+               reviewer_id = $1,
+               rejection_reason = $2,
+               reviewer_notes = $3,
+               reviewed_at = CURRENT_TIMESTAMP,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $4`,
+          [reviewerId, reason.trim(), notes || "", appId]
+        );
+
+        await query(
+          `INSERT INTO notifications (user_id, type, title, message, link)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            app.user_id,
+            "verification_rejected",
+            "Verification Decision: Rejected",
+            `Your application for "${app.skill_name}" was not approved. Reason: ${reason.trim()}`,
+            "/teacher-verification",
+          ]
+        ).catch(() => {});
+      } else if (action === "request_info") {
+        await query(
+          `UPDATE teacher_verification_applications
+           SET status = 'needs_information',
+               reviewer_id = $1,
+               reviewer_notes = $2,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $3`,
+          [reviewerId, notes.trim(), appId]
+        );
+
+        await query(
+          `INSERT INTO notifications (user_id, type, title, message, link)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            app.user_id,
+            "verification_info_needed",
+            "Additional Information Requested",
+            `A reviewer requested additional details for your "${app.skill_name}" application: ${notes.trim()}`,
+            "/teacher-verification",
+          ]
+        ).catch(() => {});
+      } else if (action === "mark_under_review") {
+        await query(
+          `UPDATE teacher_verification_applications
+           SET status = 'under_review',
+               reviewer_id = $1,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $2`,
+          [reviewerId, appId]
+        );
+      }
+
+      const updatedRes = await query(
+        `SELECT tva.*,
+                json_build_object(
+                  'id', u.id,
+                  'name', u.name,
+                  'email', u.email,
+                  'avatar_url', u.avatar_url
+                ) as applicant
+         FROM teacher_verification_applications tva
+         JOIN users u ON tva.user_id = u.id
+         WHERE tva.id = $1`,
+        [appId]
+      );
+
+      return response.status(200).json({
+        message: `Application marked as ${targetStatus}.`,
+        application: updatedRes.rows[0],
+      });
+    } catch (error) {
+      console.error("Error executing reviewer action:", error);
+      return response.status(500).json({ error: error.message });
+    }
+  }
+);
+
+
+// ----------------------------------------------------------------------------
+// PRESENCE & ACTIVE ONLINE HEARTBEAT ENDPOINTS
+// ----------------------------------------------------------------------------
+
+/**
+ * ENDPOINT: POST /api/presence/heartbeat
+ * Authenticated heartbeat indicating active user presence.
+ */
+application.post("/api/presence/heartbeat", authenticateToken, (request, response) => {
+  const userId = request.user.userId;
+  userPresenceMap.set(userId, Date.now());
+  return response.status(200).json({ success: true, timestamp: Date.now() });
+});
+
+/**
+ * ENDPOINT: GET /api/presence/active
+ * Returns user IDs currently active within the past 65 seconds.
+ */
+application.get("/api/presence/active", (request, response) => {
+  const now = Date.now();
+  const activeUserIds = [];
+  for (const [userId, lastSeen] of userPresenceMap.entries()) {
+    if (now - lastSeen < 65000) {
+      activeUserIds.push(userId);
+    }
+  }
+  return response.status(200).json({ activeUserIds });
+});
+
+/**
+ * ENDPOINT: GET /api/presence/:userId
+ * Returns online status and last seen timestamp for a specific user.
+ */
+application.get("/api/presence/:userId", (request, response) => {
+  const targetId = request.params.userId;
+  const lastSeen = userPresenceMap.get(targetId) || null;
+  const isOnline = lastSeen ? (Date.now() - lastSeen < 65000) : false;
   return response.status(200).json({
-    supportedSkills: supported,
-    count: supported.length,
-    description: "Curated 10-question verification quizzes with checked answer keys.",
+    userId: targetId,
+    online: isOnline,
+    lastSeen,
+  });
+});
+
+// ----------------------------------------------------------------------------
+// SESSION CHAT ATTACHMENTS & VOICE NOTES ENDPOINTS
+// ----------------------------------------------------------------------------
+
+/**
+ * ENDPOINT: POST /api/conversations/:id/attachments
+ * Uploads an image, document (PDF/DOCX/XLSX), or audio voice note to a conversation.
+ * Strict authorization: Only participants in the conversation may upload attachments.
+ */
+application.post(
+  "/api/conversations/:id/attachments",
+  authenticateToken,
+  (request, response, next) => {
+    attachmentUpload.single("file")(request, response, (err) => {
+      if (err instanceof multer.MulterError) {
+        return response.status(400).json({ error: `Upload limit error: ${err.message}` });
+      } else if (err) {
+        return response.status(400).json({ error: err.message });
+      }
+      next();
+    });
+  },
+  async (request, response) => {
+    try {
+      const userId = request.user.userId;
+      const convId = parseInt(request.params.id, 10);
+      const file = request.file;
+      const durationSeconds = request.body.durationSeconds ? parseInt(request.body.durationSeconds, 10) : null;
+
+      if (isNaN(convId)) {
+        if (file) try { fs.unlinkSync(file.path); } catch (e) {}
+        return response.status(400).json({ error: "Invalid conversation ID." });
+      }
+
+      if (!file) {
+        return response.status(400).json({ error: "No attachment file uploaded." });
+      }
+
+      // Validate file signature / magic bytes
+      const sigValidation = validateFileSignature(file.path, file.mimetype);
+      if (!sigValidation.valid) {
+        try { fs.unlinkSync(file.path); } catch (e) {}
+        return response.status(400).json({
+          error: `File validation failed: ${sigValidation.reason}`,
+        });
+      }
+
+      // Check participant authorization
+      const convRes = await query(
+        "SELECT id, user1_id, user2_id, is_closed FROM conversations WHERE id = $1",
+        [convId]
+      );
+      if (convRes.rows.length === 0) {
+        try { fs.unlinkSync(file.path); } catch (e) {}
+        return response.status(404).json({ error: "Conversation not found." });
+      }
+
+      const conv = convRes.rows[0];
+      if (conv.user1_id !== userId && conv.user2_id !== userId) {
+        try { fs.unlinkSync(file.path); } catch (e) {}
+        return response.status(403).json({ error: "Unauthorized: You are not a participant in this conversation." });
+      }
+
+      if (conv.is_closed) {
+        try { fs.unlinkSync(file.path); } catch (e) {}
+        return response.status(400).json({ error: "This conversation is closed." });
+      }
+
+      const isVoice = file.mimetype.startsWith("audio/") || path.extname(file.originalname).match(/\.(webm|ogg|wav|mp3|m4a)$/i);
+      const messageType = isVoice ? "voice" : "attachment";
+      const content = isVoice ? "Audio Voice Note" : (file.originalname || "File Attachment");
+
+      const insertRes = await query(
+        `INSERT INTO messages (
+           conversation_id, sender_id, content, is_read, created_at,
+           message_type, attachment_filename, attachment_original_name,
+           attachment_mimetype, attachment_size, duration_seconds
+         ) VALUES ($1, $2, $3, FALSE, CURRENT_TIMESTAMP, $4, $5, $6, $7, $8, $9)
+         RETURNING *`,
+        [
+          convId,
+          userId,
+          content,
+          messageType,
+          file.filename,
+          file.originalname,
+          file.mimetype,
+          file.size,
+          durationSeconds,
+        ]
+      );
+
+      await query("UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP WHERE id = $1", [convId]);
+
+      return response.status(201).json({
+        message: insertRes.rows[0],
+      });
+    } catch (error) {
+      console.error("Error saving attachment:", error);
+      return response.status(500).json({ error: error.message });
+    }
+  }
+);
+
+/**
+ * ENDPOINT: GET /api/conversations/:convId/attachments/:messageId
+ * Securely stream or download attachment / voice note for conversation participants.
+ */
+application.get(
+  "/api/conversations/:convId/attachments/:messageId",
+  authenticateToken,
+  async (request, response) => {
+    try {
+      const userId = request.user.userId;
+      const convId = parseInt(request.params.convId, 10);
+      const messageId = parseInt(request.params.messageId, 10);
+
+      const convRes = await query("SELECT user1_id, user2_id FROM conversations WHERE id = $1", [convId]);
+      if (convRes.rows.length === 0) {
+        return response.status(404).json({ error: "Conversation not found." });
+      }
+      const conv = convRes.rows[0];
+      if (conv.user1_id !== userId && conv.user2_id !== userId) {
+        return response.status(403).json({ error: "Unauthorized access to attachment." });
+      }
+
+      const msgRes = await query("SELECT * FROM messages WHERE id = $1 AND conversation_id = $2", [messageId, convId]);
+      if (msgRes.rows.length === 0 || !msgRes.rows[0].attachment_filename) {
+        return response.status(404).json({ error: "Attachment not found." });
+      }
+
+      const msg = msgRes.rows[0];
+      const filePath = path.join(attachmentsDir, msg.attachment_filename);
+      if (!fs.existsSync(filePath)) {
+        return response.status(404).json({ error: "Attachment file missing from storage." });
+      }
+
+      response.setHeader("Content-Type", msg.attachment_mimetype || "application/octet-stream");
+      response.setHeader(
+        "Content-Disposition",
+        `inline; filename="${encodeURIComponent(msg.attachment_original_name || msg.attachment_filename)}"`
+      );
+
+      const fileStream = fs.createReadStream(filePath);
+      return fileStream.pipe(response);
+    } catch (error) {
+      return response.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// ----------------------------------------------------------------------------
+// WEBRTC CALL SIGNALING ENDPOINTS (Accepted Sessions Only)
+// ----------------------------------------------------------------------------
+
+/**
+ * ENDPOINT: GET /api/calls/ice-servers
+ * Provides configurable STUN/TURN server configuration with network requirements disclosure.
+ */
+application.get("/api/calls/ice-servers", authenticateToken, (request, response) => {
+  const stunServers = [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun2.l.google.com:19302" },
+  ];
+
+  const iceServers = [...stunServers];
+  const turnUrl = process.env.TURN_SERVER_URL;
+  const turnUsername = process.env.TURN_USERNAME;
+  const turnCredential = process.env.TURN_CREDENTIAL;
+
+  if (turnUrl) {
+    iceServers.push({
+      urls: turnUrl,
+      username: turnUsername,
+      credential: turnCredential,
+    });
+  }
+
+  return response.status(200).json({
+    iceServers,
+    hasTurnConfigured: Boolean(turnUrl),
+    notice: "Configured STUN servers enabled for NAT traversal. Note: HTTPS is strictly required for WebRTC camera/microphone outside localhost, and symmetric NAT / restrictive institutional firewalls require a self-hosted TURN relay server configured via TURN_SERVER_URL, TURN_USERNAME, and TURN_CREDENTIAL.",
   });
 });
 
 /**
- * ENDPOINT: POST /api/quizzes/start
- * Starts a 10-question multiple choice teacher verification quiz for the specified skill.
- *
- * Requirements:
- * - Requires JWT authentication (request.user.userId).
- * - Checks if the selected skill has a curated question bank.
- * - If not available: returns 404 with an explanation that no quiz is available yet (no generic questions).
- * - Randomly selects 10 distinct questions from the skill's question bank.
- * - Randomizes option order for every question.
- * - Keeps correct answers server-side; NEVER leaks answer key or preselected answers to client.
+ * ENDPOINT: POST /api/calls/signal
+ * Sends a WebRTC signaling message (offer, answer, candidate, start, end, reaction).
+ * Strictly authorizes that the conversation's linked session is accepted or confirmed.
  */
-application.post("/api/quizzes/start", authenticateToken, (request, response) => {
-  try {
-    const { skillName } = request.body;
-
-    if (!skillName || typeof skillName !== "string" || skillName.trim() === "") {
-      return response.status(400).json({
-        error: "Skill name is required to start a verification quiz.",
-      });
-    }
-
-    const cleanSkill = skillName.trim();
-
-    // Check if question bank is available for this skill
-    if (!hasQuestionBank(cleanSkill)) {
-      const supportedList = getSupportedSkills()
-        .map((s) => s.split(" ").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "))
-        .join(", ");
-      return response.status(404).json({
-        available: false,
-        error: `A verification quiz is not available for "${cleanSkill}" yet.`,
-        message: `A verification quiz is not available for "${cleanSkill}" yet. Curated qualification quizzes with domain-specific questions are currently supported for: ${supportedList}. Verified teacher badges are only awarded for skills with curated qualification quizzes.`,
-        skillName: cleanSkill,
-        supportedSkills: getSupportedSkills(),
-      });
-    }
-
-    // Generate 10-question quiz with randomized options and distinct questions
-    const generated = generateQuiz(cleanSkill);
-    if (!generated) {
-      return response.status(500).json({
-        error: `Failed to generate quiz for "${cleanSkill}". Insufficient questions in bank.`,
-      });
-    }
-
-    const quizId = `quiz_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-
-    // Store session server-side with 1 hour expiration
-    activeQuizSessions.set(quizId, {
-      quizId,
-      userId: request.user.userId,
-      skillName: cleanSkill,
-      answerKey: generated.answerKey,
-      clientQuestions: generated.clientQuestions,
-      createdAt: Date.now(),
-      expiresAt: Date.now() + 60 * 60 * 1000,
-    });
-
-    return response.status(200).json({
-      quizId,
-      skillName: cleanSkill,
-      totalQuestions: generated.clientQuestions.length,
-      passingScore: 5,
-      passingPercentage: 50,
-      questions: generated.clientQuestions, // Client receives NO correct answers and NO preselected answers
-    });
-  } catch (error) {
-    console.error("Error starting quiz:", error);
-    return response.status(500).json({
-      error: "An internal server error occurred while starting the quiz.",
-      details: error.message,
-    });
-  }
-});
-
-/**
- * ENDPOINT: POST /api/quizzes/submit
- * Grades the submitted quiz on the server and records the attempt in PostgreSQL.
- *
- * Requirements:
- * - Uses JWT identity for authorization; never trusts user ID from request body.
- * - Scores result out of 10 and percentage.
- * - Score of 5/10 or higher qualifies user as verified teacher for that specific skill.
- * - Score below 5/10 shows result and supportive message:
- *   "You didn’t pass this time. Review the skill and try again when you’re ready." and allows retake.
- * - Persists attempt into quiz_attempts table.
- * - On pass (score >= 5): marks is_verified = TRUE in skills table and issues in-app notification.
- */
-application.post("/api/quizzes/submit", authenticateToken, async (request, response) => {
-  try {
-    const userId = request.user.userId; // Strictly from JWT
-    const { quizId, skillName, answers } = request.body;
-
-    if (!skillName || typeof skillName !== "string" || skillName.trim() === "") {
-      return response.status(400).json({
-        error: "Skill name is required to submit a quiz.",
-      });
-    }
-
-    const cleanSkill = skillName.trim();
-
-    if (!hasQuestionBank(cleanSkill)) {
-      return response.status(404).json({
-        error: `A verification quiz is not available for "${cleanSkill}" yet.`,
-      });
-    }
-
-    if (!answers || typeof answers !== "object") {
-      return response.status(400).json({
-        error: "Submitted answers are required.",
-      });
-    }
-
-    // Retrieve active session or reconstruct answer lookup
-    const session = activeQuizSessions.get(quizId);
-    if (session && session.userId !== userId) {
-      return response.status(403).json({
-        error: "Forbidden: You are not authorized to submit this quiz session.",
-      });
-    }
-
-    // Determine the questions to grade
-    let questionsToGrade = [];
-    if (session && session.clientQuestions) {
-      questionsToGrade = session.clientQuestions;
-    } else {
-      // If session expired, grade submitted question IDs that exist in the bank
-      const submittedQIds = Array.isArray(answers) ? answers.map((a) => a.questionId) : Object.keys(answers);
-      questionsToGrade = submittedQIds
-        .map((qId) => {
-          const q = getQuestionDetails(cleanSkill, qId);
-          return q ? { id: q.id, question: q.question } : null;
-        })
-        .filter(Boolean);
-    }
-
-    if (questionsToGrade.length === 0) {
-      return response.status(400).json({
-        error: "No valid questions were submitted for grading.",
-      });
-    }
-
-    // Grade each question server-side
-    let score = 0;
-    const total = 10; // Quizzes are standard 10 questions
-    const questionResults = [];
-
-    for (const q of questionsToGrade) {
-      let chosenAnswer = "";
-      if (Array.isArray(answers)) {
-        const found = answers.find((a) => a.questionId === q.id);
-        chosenAnswer = found ? String(found.answer || "").trim() : "";
-      } else {
-        chosenAnswer = answers[q.id] ? String(answers[q.id]).trim() : "";
-      }
-
-      let questionDetail = null;
-      if (session && session.answerKey && session.answerKey.has(q.id)) {
-        questionDetail = session.answerKey.get(q.id);
-      } else {
-        questionDetail = getQuestionDetails(cleanSkill, q.id);
-      }
-
-      const correctAnswer = questionDetail ? questionDetail.correctAnswer : "";
-      const explanation = questionDetail ? questionDetail.explanation : "";
-      const isCorrect = Boolean(correctAnswer && chosenAnswer && chosenAnswer === correctAnswer);
-
-      if (isCorrect) {
-        score += 1;
-      }
-
-      questionResults.push({
-        questionId: q.id,
-        question: q.question,
-        chosenAnswer: chosenAnswer || "(No answer selected)",
-        correctAnswer,
-        isCorrect,
-        explanation,
-      });
-    }
-
-    const percentage = Math.round((score / total) * 100);
-    const passed = score >= 5;
-
-    // Database persistence
-    const conn = await checkConnection();
-    let attemptRecord = null;
-
-    if (conn.reachable) {
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-
-        // Save attempt to quiz_attempts
-        const attemptRes = await client.query(
-          `INSERT INTO quiz_attempts (user_id, skill_name, score, total, percentage, passed)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING id, user_id, skill_name, score, total, percentage, passed, created_at`,
-          [userId, cleanSkill, score, total, percentage, passed]
-        );
-        attemptRecord = attemptRes.rows[0];
-
-        // If passed (score >= 5), mark skill as verified in skills table
-        if (passed) {
-          // Check if the user already has this skill listed as teachable
-          const skillCheck = await client.query(
-            `SELECT id FROM skills WHERE user_id = $1 AND LOWER(skill_name) = LOWER($2) AND type = 'teach'`,
-            [userId, cleanSkill]
-          );
-
-          if (skillCheck.rows.length > 0) {
-            await client.query(
-              `UPDATE skills
-               SET is_verified = TRUE, verified_at = CURRENT_TIMESTAMP
-               WHERE user_id = $1 AND LOWER(skill_name) = LOWER($2) AND type = 'teach'`,
-              [userId, cleanSkill]
-            );
-          } else {
-            // If they haven't saved this skill to their profile yet, insert verified teachable skill
-            await client.query(
-              `INSERT INTO skills (user_id, skill_name, level, type, is_verified, verified_at)
-               VALUES ($1, $2, 'intermediate', 'teach', TRUE, CURRENT_TIMESTAMP)
-               ON CONFLICT ON CONSTRAINT uq_user_skill_type DO UPDATE SET
-                 is_verified = TRUE,
-                 verified_at = CURRENT_TIMESTAMP`,
-              [userId, cleanSkill]
-            );
-          }
-
-          // Create an in-app celebration notification
-          await client.query(
-            `INSERT INTO notifications (user_id, type, title, message, link)
-             VALUES ($1, 'quiz_passed', $2, $3, '/profile')`,
-            [
-              userId,
-              `✓ Verified Teacher: ${cleanSkill}`,
-              `Congratulations! You passed the ${cleanSkill} teacher verification quiz with a score of ${score}/10 (${percentage}%). You are now a verified teacher for this skill!`,
-            ]
-          ).catch(() => {});
-        }
-
-        await client.query("COMMIT");
-      } catch (dbErr) {
-        await client.query("ROLLBACK");
-        console.error("Error saving quiz attempt to database:", dbErr);
-      } finally {
-        client.release();
-      }
-    }
-
-    // Clean up active session
-    if (quizId) {
-      activeQuizSessions.delete(quizId);
-    }
-
-    const message = passed
-      ? `Congratulations! You passed the ${cleanSkill} verification quiz with a score of ${score}/10 (${percentage}%). You have earned the Verified Teacher badge!`
-      : `You didn’t pass this time. Review the skill and try again when you’re ready.`;
-
-    return response.status(200).json({
-      quizId,
-      skillName: cleanSkill,
-      score,
-      total,
-      percentage,
-      passed,
-      qualifiesAsTeacher: passed,
-      scoreDisplay: `${score}/${total} (${percentage}%)`,
-      message,
-      results: questionResults,
-      attemptId: attemptRecord ? attemptRecord.id : null,
-    });
-  } catch (error) {
-    console.error("Error submitting quiz:", error);
-    return response.status(500).json({
-      error: "An internal server error occurred while grading the quiz.",
-      details: error.message,
-    });
-  }
-});
-
-/**
- * ENDPOINT: GET /api/quizzes/attempts/my
- * Retrieves past quiz attempts and verified skills for the authenticated user.
- */
-application.get("/api/quizzes/attempts/my", authenticateToken, async (request, response) => {
+application.post("/api/calls/signal", authenticateToken, async (request, response) => {
   try {
     const userId = request.user.userId;
-    const conn = await checkConnection();
+    const { conversationId, type, payload } = request.body;
 
-    if (!conn.reachable) {
-      return response.status(503).json({ error: "Database unavailable." });
+    if (!conversationId || !type) {
+      return response.status(400).json({ error: "conversationId and type are required." });
     }
 
-    const attemptsRes = await query(
-      `SELECT id, skill_name, score, total, percentage, passed, created_at
-       FROM quiz_attempts
-       WHERE user_id = $1
-       ORDER BY created_at DESC
-       LIMIT 50`,
-      [userId]
+    const convId = parseInt(conversationId, 10);
+    const convRes = await query(
+      `SELECT c.id, c.user1_id, c.user2_id, c.session_id, sb.status as session_status
+       FROM conversations c
+       LEFT JOIN session_bookings sb ON c.session_id = sb.id
+       WHERE c.id = $1`,
+      [convId]
     );
 
-    const verifiedSkillsRes = await query(
-      `SELECT id, skill_name, level, verified_at
-       FROM skills
-       WHERE user_id = $1 AND is_verified = TRUE AND type = 'teach'
-       ORDER BY verified_at DESC`,
-      [userId]
+    if (convRes.rows.length === 0) {
+      return response.status(404).json({ error: "Conversation not found." });
+    }
+
+    const conv = convRes.rows[0];
+    if (conv.user1_id !== userId && conv.user2_id !== userId) {
+      return response.status(403).json({ error: "Unauthorized: You are not in this conversation." });
+    }
+
+    // Call permissions: Only allowed for accepted or confirmed sessions
+    if (conv.session_status && !["accepted", "confirmed"].includes(conv.session_status)) {
+      return response.status(400).json({
+        error: `WebRTC calls are only enabled for accepted sessions (current session status: "${conv.session_status}").`,
+      });
+    }
+
+    // Push signal to in-memory call signaling queue for this conversation
+    if (!callSignalingMap.has(convId)) {
+      callSignalingMap.set(convId, []);
+    }
+    const queue = callSignalingMap.get(convId);
+
+    const signalObj = {
+      id: `sig_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      from: userId,
+      type,
+      payload,
+      timestamp: Date.now(),
+    };
+    queue.push(signalObj);
+
+    // Keep queue trimmed to last 40 signals
+    if (queue.length > 40) {
+      queue.splice(0, queue.length - 40);
+    }
+
+    // If call started or ended, record event in session conversation messages
+    if (type === "start") {
+      const mode = payload && payload.mode === "audio" ? "Audio Call" : "Video Call";
+      await query(
+        `INSERT INTO messages (
+           conversation_id, sender_id, content, is_read, created_at,
+           message_type, call_action
+         ) VALUES ($1, $2, $3, FALSE, CURRENT_TIMESTAMP, 'call_log', 'started')`,
+        [convId, userId, `${mode} started`]
+      ).catch(() => {});
+    } else if (type === "end") {
+      const duration = payload && payload.duration ? parseInt(payload.duration, 10) : 0;
+      await query(
+        `INSERT INTO messages (
+           conversation_id, sender_id, content, is_read, created_at,
+           message_type, call_action, duration_seconds
+         ) VALUES ($1, $2, $3, FALSE, CURRENT_TIMESTAMP, 'call_log', 'ended', $4)`,
+        [convId, userId, `Call ended (${duration}s)`, duration]
+      ).catch(() => {});
+    }
+
+    return response.status(200).json({ success: true, signal: signalObj });
+  } catch (error) {
+    console.error("Error processing call signal:", error);
+    return response.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * ENDPOINT: GET /api/calls/signal/:conversationId
+ * Retrieves pending WebRTC signals directed to current user.
+ */
+application.get("/api/calls/signal/:conversationId", authenticateToken, async (request, response) => {
+  try {
+    const userId = request.user.userId;
+    const convId = parseInt(request.params.conversationId, 10);
+    const since = request.query.since ? parseInt(request.query.since, 10) : (Date.now() - 10000);
+
+    const convRes = await query(
+      `SELECT c.id, c.user1_id, c.user2_id, c.session_id, sb.status as session_status
+       FROM conversations c
+       LEFT JOIN session_bookings sb ON c.session_id = sb.id
+       WHERE c.id = $1`,
+      [convId]
     );
+    if (convRes.rows.length === 0) {
+      return response.status(404).json({ error: "Conversation not found." });
+    }
+    const conv = convRes.rows[0];
+    if (conv.user1_id !== userId && conv.user2_id !== userId) {
+      return response.status(403).json({ error: "Unauthorized: You are not a participant in this conversation." });
+    }
+    if (conv.session_status && !["accepted", "confirmed"].includes(conv.session_status)) {
+      return response.status(403).json({
+        error: `Calling signals are only accessible for accepted sessions (current session status: "${conv.session_status}").`,
+      });
+    }
+
+    const queue = callSignalingMap.get(convId) || [];
+    // Return signals created by the peer that arrived after 'since'
+    const pending = queue.filter((s) => s.from !== userId && s.timestamp > since);
 
     return response.status(200).json({
-      attempts: attemptsRes.rows || [],
-      verifiedSkills: verifiedSkillsRes.rows || [],
+      signals: pending,
+      serverTime: Date.now(),
     });
   } catch (error) {
-    console.error("Error retrieving user quiz attempts:", error);
-    return response.status(500).json({
-      error: "An internal server error occurred while retrieving quiz attempts.",
-      details: error.message,
-    });
+    return response.status(500).json({ error: error.message });
   }
+});
+
+// ----------------------------------------------------------------------------
+// RETIRED QUIZ ENDPOINTS (Preserves historical quiz_attempts in PostgreSQL)
+// ----------------------------------------------------------------------------
+application.all(["/api/quizzes", "/api/quizzes/*", "/api/quiz", "/api/quiz/*"], (request, response) => {
+  return response.status(410).json({
+    error: "The quiz verification feature has been retired. Teacher verification is conducted exclusively through document verification (Resume & Certificate) under /api/teacher-verification.",
+    status: 410,
+    retired: true,
+  });
 });
 
 // ----------------------------------------------------------------------------
@@ -3409,7 +4947,8 @@ application.post("/api/auth/login", async (request, response) => {
     const result = await query(
       `SELECT u.id, u.name, u.email, u.password_hash, u.role, u.bio, u.reputation_score,
               u.username, u.profile_summary, u.specialization_domain, u.work_experience, u.social_profiles, u.avatar_url,
-              u.active_mode, u.can_teach, u.can_learn,
+              u.active_mode, u.can_teach, u.can_learn, COALESCE(u.is_reviewer, FALSE) as is_reviewer,
+              COALESCE(u.is_demo, FALSE) as is_demo,
               COALESCE(
                 json_agg(
                   json_build_object('id', s.id, 'skill_name', s.skill_name, 'level', s.level, 'type', s.type, 'is_verified', COALESCE(s.is_verified, FALSE), 'verified_at', s.verified_at)
@@ -3433,7 +4972,11 @@ application.post("/api/auth/login", async (request, response) => {
     const dbUser = result.rows[0];
 
     // Compare submitted password against stored bcrypt hash
-    const passwordMatches = await bcrypt.compare(password, dbUser.password_hash);
+    let passwordMatches = false;
+    if (dbUser.password_hash) {
+      passwordMatches = await bcrypt.compare(password, dbUser.password_hash);
+    }
+
     if (!passwordMatches) {
       return response.status(401).json({
         error: "Invalid email or password. Please check your credentials and try again.",
@@ -3457,6 +5000,7 @@ application.post("/api/auth/login", async (request, response) => {
       active_mode: dbUser.active_mode || "learner",
       can_teach: dbUser.can_teach !== false,
       can_learn: dbUser.can_learn !== false,
+      is_reviewer: Boolean(dbUser.is_reviewer),
       skills: dbUser.skills || [],
     };
 
@@ -3477,6 +5021,64 @@ application.post("/api/auth/login", async (request, response) => {
     return response.status(500).json({
       error: "An internal server error occurred during login.",
     });
+  }
+});
+
+/**
+ * ENDPOINT: GET /api/auth/me
+ *
+ * Validates the caller's JWT token and returns their current profile from PostgreSQL.
+ * Used on app startup and session restoration to prevent stale or expired session tokens.
+ */
+application.get("/api/auth/me", authenticateToken, async (request, response) => {
+  try {
+    const userId = request.user.userId;
+    const res = await query(
+      `SELECT u.id, u.name, u.email, u.username, u.role, u.bio, u.profile_summary,
+              u.specialization_domain, u.work_experience, u.social_profiles, u.avatar_url,
+              u.reputation_score, u.active_mode, u.can_teach, u.can_learn,
+              COALESCE(
+                json_agg(
+                  json_build_object('id', s.id, 'skill_name', s.skill_name, 'level', s.level, 'type', s.type, 'is_verified', COALESCE(s.is_verified, FALSE), 'verified_at', s.verified_at)
+                ) FILTER (WHERE s.id IS NOT NULL),
+                '[]'
+              ) as skills
+       FROM users u
+       LEFT JOIN skills s ON u.id = s.user_id
+       WHERE u.id = $1
+       GROUP BY u.id`,
+      [userId]
+    );
+
+    if (res.rows.length === 0) {
+      return response.status(404).json({ error: "User account not found." });
+    }
+
+    const u = res.rows[0];
+    const safeUser = {
+      id: u.id,
+      name: u.name,
+      email: u.email,
+      username: u.username || null,
+      role: u.role,
+      bio: u.bio || u.profile_summary || "",
+      profile_summary: u.profile_summary || u.bio || "",
+      specialization_domain: u.specialization_domain || "",
+      work_experience: u.work_experience || [],
+      social_profiles: u.social_profiles || {},
+      avatar_url: u.avatar_url || null,
+      reputation_score: parseFloat(u.reputation_score) || 5.0,
+      active_mode: u.active_mode || "learner",
+      can_teach: u.can_teach !== false,
+      can_learn: u.can_learn !== false,
+      is_reviewer: Boolean(u.is_reviewer),
+      skills: u.skills || [],
+    };
+
+    return response.status(200).json({ user: safeUser });
+  } catch (err) {
+    console.error("Error in GET /api/auth/me:", err.message);
+    return response.status(500).json({ error: "Internal server error." });
   }
 });
 
@@ -3536,5 +5138,4 @@ module.exports = {
   seedDatabase,
   sortMentorsByLevel,
   initializeDatabaseAndDsa,
-  activeQuizSessions,
 };

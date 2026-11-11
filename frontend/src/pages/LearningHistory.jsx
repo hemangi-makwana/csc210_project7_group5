@@ -1,75 +1,131 @@
 /**
  * ============================================================================
- * Learning History & Reviews Page (src/pages/LearningHistory.jsx)
+ * Learning History & Peer Reviews Page (src/pages/LearningHistory.jsx)
  * ============================================================================
- * Displays session history for both learner and mentor roles.
- * Supports peer reviews and 5-star ratings without decorative emojis.
+ * Strictly separates Learner vs Teacher histories according to active mode:
+ * - Learner mode shows only sessions where the user was the learner.
+ * - Teacher mode shows only sessions where the user was the teacher.
+ * - Provides Accept / Decline actions for teachers on pending requests.
+ * - Provides Mark Completed action for accepted sessions.
+ * - Shows feedback form only to learner on completed sessions (1 review limit).
+ * - Displays coordination conversation link and decline reason transparency.
  */
 
 import React, { useState, useEffect } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
-import { getUserSessions, submitSessionReview } from '../api/sessions.js';
+import {
+  getUserSessions,
+  submitSessionReview,
+  acceptSession,
+  declineSession,
+  completeSession,
+} from '../api/sessions.js';
 import { StarRating } from '../components/StarRating.jsx';
 import { Loader, EmptyState, ErrorState, SuccessState } from '../components/Feedback.jsx';
-import { HistoryIcon, CalendarIcon, CheckIcon } from '../components/Icons.jsx';
+import { HistoryIcon, CalendarIcon, CheckIcon, MessageIcon } from '../components/Icons.jsx';
 
 export function LearningHistory() {
-  const { user, isTeacher } = useAuth();
-  const [searchParams, setSearchParams] = useSearchParams();
-
-  // Tab state: 'learning' (as learner) or 'teaching' (as teacher/mentor)
+  const { user, isTeacher, isLearner, setMode } = useAuth();
+  const [searchParams] = useSearchParams();
   const viewParam = searchParams.get('view');
-  const [activeTab, setActiveTab] = useState(
-    viewParam === 'teaching' ? 'teaching' : (viewParam === 'learning' ? 'learning' : (isTeacher ? 'teaching' : 'learning'))
-  );
 
+  // Synchronize view query param with active mode if specified
+  useEffect(() => {
+    if (viewParam === 'teaching' && !isTeacher) {
+      setMode('teacher');
+    } else if (viewParam === 'learning' && isTeacher) {
+      setMode('learner');
+    }
+  }, [viewParam, isTeacher, setMode]);
+
+  // Active role view: locked strictly to current active mode
+  const currentRole = isTeacher ? 'teacher' : 'learner';
   const [sessionList, setSessionList] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState(null);
   const [successMessage, setSuccessMessage] = useState(null);
 
-  // Review modal / inline state
+  // Review state (Learners on completed sessions)
   const [reviewingSessionId, setReviewingSessionId] = useState(null);
   const [reviewRating, setReviewRating] = useState(5);
   const [reviewComment, setReviewComment] = useState('');
   const [isSubmittingReview, setIsSubmittingReview] = useState(false);
 
-  // Synchronize tab state if URL query param changes
-  useEffect(() => {
-    if (viewParam === 'teaching' || viewParam === 'learning') {
-      setActiveTab(viewParam);
-    }
-  }, [viewParam]);
+  // Decline modal state
+  const [decliningSessionId, setDecliningSessionId] = useState(null);
+  const [declineReason, setDeclineReason] = useState('');
+  const [isDeclining, setIsDeclining] = useState(false);
 
-  function switchTab(tab) {
-    setActiveTab(tab);
-    setSearchParams({ view: tab });
-  }
-
-  async function fetchHistory() {
-    const activeUserId = user ? user.id : 'usr_002';
+  const fetchHistory = React.useCallback(async () => {
+    if (!user) return;
     setIsLoading(true);
     setErrorMessage(null);
 
     try {
-      const roleQuery = activeTab === 'teaching' ? 'teacher' : 'learner';
-      const response = await getUserSessions(activeUserId, roleQuery);
-      // Backend returns filtered sessions and specific learning/teaching arrays
-      const list = activeTab === 'teaching'
-        ? (response.teachingSessions || response.sessions || [])
-        : (response.learningSessions || response.sessions || []);
+      const response = await getUserSessions(user.id, currentRole);
+      // Strictly isolate role records: teaching sessions only in teacher mode, learning sessions only in learner mode
+      const list = isTeacher
+        ? (response.teachingSessions || [])
+        : (response.learningSessions || []);
       setSessionList(list);
     } catch (error) {
       setErrorMessage(error.message || 'Failed to load session history.');
     } finally {
       setIsLoading(false);
     }
-  }
+  }, [user, isTeacher, currentRole]);
 
   useEffect(() => {
+    // Immediately clear previous role's sessions so mode switching never mixes histories
+    setSessionList([]);
     fetchHistory();
-  }, [user, activeTab]);
+  }, [fetchHistory]);
+
+  // Teacher Accept action
+  async function handleAcceptSession(sessionId) {
+    setErrorMessage(null);
+    try {
+      await acceptSession(sessionId);
+      setSuccessMessage('Session booking accepted! The learner has been notified.');
+      await fetchHistory();
+    } catch (err) {
+      setErrorMessage(err.message || 'Failed to accept session booking.');
+    }
+  }
+
+  // Teacher Decline action
+  async function handleDeclineSession(e) {
+    e.preventDefault();
+    if (!decliningSessionId) return;
+
+    setIsDeclining(true);
+    setErrorMessage(null);
+
+    try {
+      await declineSession(decliningSessionId, declineReason.trim());
+      setSuccessMessage('Session booking declined. Coordination thread closed.');
+      setDecliningSessionId(null);
+      setDeclineReason('');
+      await fetchHistory();
+    } catch (err) {
+      setErrorMessage(err.message || 'Failed to decline session booking.');
+    } finally {
+      setIsDeclining(false);
+    }
+  }
+
+  // Mark Completed action
+  async function handleCompleteSession(sessionId) {
+    setErrorMessage(null);
+    try {
+      await completeSession(sessionId);
+      setSuccessMessage('Session marked as completed! Feedback is now unlocked for the learner.');
+      await fetchHistory();
+    } catch (err) {
+      setErrorMessage(err.message || 'Failed to mark session completed.');
+    }
+  }
 
   function startReview(session) {
     setReviewingSessionId(session.id);
@@ -92,7 +148,7 @@ export function LearningHistory() {
       };
 
       const response = await submitSessionReview(payload);
-      setSuccessMessage(response.message || 'Review submitted successfully! Mentor reputation score updated.');
+      setSuccessMessage(response.message || 'Review recorded successfully! Teacher reputation updated.');
 
       setSessionList(prevSessions =>
         prevSessions.map(sess => {
@@ -116,51 +172,35 @@ export function LearningHistory() {
 
   return (
     <div className="page" style={{ maxWidth: '850px' }}>
-      <div className="page-header">
-        <h1 className="page-title">
-          Session History & Peer Reviews
+      <div className="page-header" style={{ marginBottom: '1.5rem' }}>
+        <h1 className="page-title" style={{ fontSize: '1.8rem', fontWeight: '800' }}>
+          {isTeacher ? 'Teaching Sessions & History' : 'Learning Sessions & History'}
         </h1>
-        <p className="page-subtitle">
-          Track completed sessions, review mentor evaluations, and inspect feedback from your community exchanges.
+        <p className="page-subtitle" style={{ color: 'var(--color-text-muted)' }}>
+          {isTeacher
+            ? 'Manage incoming booking requests from learners, conduct scheduled sessions, and review student feedback.'
+            : 'Track upcoming sessions, coordinate with your mentors, and leave evaluations for completed sessions.'}
         </p>
       </div>
 
-      {/* Role-Separated Tab Switcher */}
-      <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1.75rem', borderBottom: '1px solid var(--color-border)', paddingBottom: '0.75rem' }}>
-        <button
-          type="button"
-          onClick={() => switchTab('learning')}
-          className={`btn ${activeTab === 'learning' ? 'btn-primary' : 'btn-outline'}`}
-          style={{ flex: 1, justifyContent: 'center' }}
-        >
-          Learning History (as Learner)
-        </button>
-        <button
-          type="button"
-          onClick={() => switchTab('teaching')}
-          className={`btn ${activeTab === 'teaching' ? 'btn-primary' : 'btn-outline'}`}
-          style={{ flex: 1, justifyContent: 'center' }}
-        >
-          Teaching History (as Mentor)
-        </button>
-      </div>
-
-      {successMessage && <SuccessState message={successMessage} />}
+      {successMessage && <SuccessState message={successMessage} onDismiss={() => setSuccessMessage(null)} />}
       {errorMessage && !isLoading && <ErrorState message={errorMessage} onRetry={fetchHistory} />}
 
-      {isLoading && <Loader message={`Fetching ${activeTab === 'teaching' ? 'teaching' : 'learning'} session records...`} />}
+      {isLoading && <Loader message={`Loading ${currentRole} session records...`} />}
 
       {!isLoading && !errorMessage && sessionList.length === 0 && (
         <EmptyState
           icon={<HistoryIcon size={36} />}
-          title={activeTab === 'teaching' ? 'No teaching sessions found' : 'No learning sessions found'}
-          description={activeTab === 'teaching'
-            ? "You haven't conducted any mentoring sessions for students yet. Offer skills or check course requests to start teaching."
-            : "You haven't scheduled or completed any learning sessions as a student yet."}
+          title={isTeacher ? 'No teaching sessions found' : 'No learning sessions found'}
+          description={
+            isTeacher
+              ? 'You have no teaching requests or sessions yet. Verify your skills to receive mentorship bookings.'
+              : 'You have not booked any mentorship sessions yet. Explore available courses or mentors to start learning!'
+          }
           actionButton={
-            activeTab === 'teaching' ? (
-              <Link to="/requests" className="btn btn-primary btn-sm">
-                Browse Learner Requests
+            isTeacher ? (
+              <Link to="/teacher-verification" className="btn btn-primary btn-sm">
+                Go to Teacher Verification
               </Link>
             ) : (
               <Link to="/booking" className="btn btn-primary btn-sm">
@@ -174,12 +214,9 @@ export function LearningHistory() {
       {!isLoading && !errorMessage && sessionList.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
           {sessionList.map((session) => {
-            // Strictly query the opposite participant:
-            // In Learning History, partner is mentor.
-            // In Teaching History, partner is learner.
-            const partner = activeTab === 'teaching'
+            const partner = isTeacher
               ? (session.learner || { name: 'Student' })
-              : (session.mentor || { name: 'Mentor' });
+              : (session.mentor || { name: 'Teacher' });
 
             const formattedDate = new Date(session.scheduled_at).toLocaleDateString('en-US', {
               weekday: 'short',
@@ -190,57 +227,42 @@ export function LearningHistory() {
               minute: '2-digit',
             });
 
+            const isPending = session.status === 'pending' || session.status === 'queued';
+            const isAccepted = session.status === 'accepted' || session.status === 'confirmed';
             const isCompleted = session.status === 'completed';
-            const partnerAvatar = partner.avatar_url
-              ? (partner.avatar_url.startsWith('http') ? partner.avatar_url : partner.avatar_url)
-              : null;
+            const isDeclined = session.status === 'declined';
 
             return (
-              <div key={session.id} className="card">
+              <div key={session.id} className="card" style={{ padding: '1.5rem' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '0.75rem' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                    {partnerAvatar ? (
-                      <img
-                        src={partnerAvatar}
-                        alt={partner.name}
-                        style={{ width: '42px', height: '42px', borderRadius: '50%', objectFit: 'cover', border: '1px solid var(--color-border)' }}
-                        onError={(e) => { e.target.style.display = 'none'; }}
-                      />
-                    ) : (
-                      <div
-                        style={{
-                          width: '42px',
-                          height: '42px',
-                          borderRadius: '50%',
-                          backgroundColor: 'rgba(99, 102, 241, 0.2)',
-                          color: '#818cf8',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          fontWeight: '700',
-                          fontSize: '1rem',
-                        }}
-                      >
-                        {(partner.name || 'P').charAt(0).toUpperCase()}
-                      </div>
-                    )}
+                    <div
+                      style={{
+                        width: '42px',
+                        height: '42px',
+                        borderRadius: '50%',
+                        backgroundColor: isTeacher ? 'rgba(124, 58, 237, 0.15)' : 'rgba(37, 99, 235, 0.15)',
+                        color: isTeacher ? 'var(--color-teacher)' : 'var(--color-learner)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontWeight: '700',
+                        fontSize: '1rem',
+                      }}
+                    >
+                      {(partner.name || 'P').charAt(0).toUpperCase()}
+                    </div>
                     <div>
                       <h3 style={{ fontSize: '1.15rem', fontWeight: '700', color: 'var(--color-text-primary)', margin: 0 }}>
-                        {activeTab === 'teaching' ? `Student: ${partner.name}` : `Mentor: ${partner.name}`}
+                        {isTeacher ? `Student: ${partner.name}` : `Teacher: ${partner.name}`}
                       </h3>
                       <p style={{ fontSize: '0.82rem', color: 'var(--color-text-muted)', marginTop: '0.15rem' }}>
-                        {formattedDate} • <span style={{ color: activeTab === 'teaching' ? '#a78bfa' : '#60a5fa' }}>{activeTab === 'teaching' ? 'Teaching Session' : 'Learning Session'}</span>
+                        {formattedDate} • <strong>{isTeacher ? 'Teaching Session' : 'Learning Session'}</strong>
                       </p>
                     </div>
                   </div>
 
-                  <span className={`badge ${
-                    session.status === 'completed'
-                      ? 'badge-volunteer'
-                      : session.status === 'confirmed'
-                      ? 'badge-student'
-                      : 'badge-professional'
-                  }`}>
+                  <span className={`status-chip ${session.status}`}>
                     {session.status.charAt(0).toUpperCase() + session.status.slice(1)}
                   </span>
                 </div>
@@ -248,7 +270,7 @@ export function LearningHistory() {
                 {session.topic && (
                   <div style={{ marginBottom: '0.75rem' }}>
                     <span style={{ fontSize: '0.82rem', fontWeight: '600', color: 'var(--color-text-muted)' }}>Topic: </span>
-                    <span style={{ fontSize: '0.9rem', color: 'var(--color-text-primary)' }}>{session.topic}</span>
+                    <span style={{ fontSize: '0.92rem', color: 'var(--color-text-primary)' }}>{session.topic}</span>
                   </div>
                 )}
 
@@ -266,6 +288,72 @@ export function LearningHistory() {
                   </p>
                 )}
 
+                {/* Declined Reason Display */}
+                {isDeclined && (
+                  <div
+                    style={{
+                      padding: '0.75rem 1rem',
+                      borderRadius: 'var(--radius-sm)',
+                      backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                      border: '1px solid rgba(239, 68, 68, 0.25)',
+                      fontSize: '0.88rem',
+                      color: 'var(--color-danger)',
+                      marginBottom: '0.75rem',
+                    }}
+                  >
+                    <strong>Session Declined:</strong> {session.declined_reason || 'Teacher was unavailable at requested time.'} (Coordination thread closed)
+                  </div>
+                )}
+
+                {/* Action Buttons: Accept / Decline (Teachers) */}
+                {isTeacher && isPending && (
+                  <div style={{ display: 'flex', gap: '0.65rem', marginTop: '1rem', flexWrap: 'wrap' }}>
+                    <button
+                      onClick={() => handleAcceptSession(session.id)}
+                      className="btn btn-primary btn-sm"
+                      style={{ backgroundColor: 'var(--color-success)', borderColor: 'var(--color-success)' }}
+                    >
+                      ✓ Accept Booking
+                    </button>
+                    <button
+                      onClick={() => setDecliningSessionId(session.id)}
+                      className="btn btn-secondary btn-sm"
+                      style={{ color: 'var(--color-danger)' }}
+                    >
+                      Decline...
+                    </button>
+                    <Link
+                      to="/messages"
+                      className="btn btn-outline btn-sm"
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}
+                    >
+                      <MessageIcon size={16} />
+                      Coordinate in Chat
+                    </Link>
+                  </div>
+                )}
+
+                {/* Mark Completed (for Accepted sessions) */}
+                {isAccepted && (
+                  <div style={{ display: 'flex', gap: '0.65rem', marginTop: '1rem', flexWrap: 'wrap' }}>
+                    <button
+                      onClick={() => handleCompleteSession(session.id)}
+                      className="btn btn-outline btn-sm"
+                      style={{ fontWeight: '700' }}
+                    >
+                      Mark Session Completed
+                    </button>
+                    <Link
+                      to="/messages"
+                      className="btn btn-secondary btn-sm"
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}
+                    >
+                      <MessageIcon size={16} />
+                      Chat with {partner.name}
+                    </Link>
+                  </div>
+                )}
+
                 {/* Existing Review Display */}
                 {session.review ? (
                   <div style={{
@@ -273,33 +361,33 @@ export function LearningHistory() {
                     border: '1px solid var(--color-border)',
                     borderRadius: 'var(--radius-md)',
                     padding: '0.85rem',
-                    marginTop: '0.5rem'
+                    marginTop: '0.75rem'
                   }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
-                      <span style={{ fontSize: '0.85rem', fontWeight: '600', color: 'var(--color-text-primary)' }}>
-                        {activeTab === 'teaching' ? 'Feedback from Student:' : 'Your Evaluation:'}
+                      <span style={{ fontSize: '0.85rem', fontWeight: '700', color: 'var(--color-text-primary)' }}>
+                        {isTeacher ? 'Feedback from Learner:' : 'Your Evaluation:'}
                       </span>
                       <StarRating rating={session.review.rating} />
                     </div>
                     {session.review.comment && (
-                      <p style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)', fontStyle: 'italic' }}>
+                      <p style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)', fontStyle: 'italic', margin: 0 }}>
                         "{session.review.comment}"
                       </p>
                     )}
                   </div>
-                ) : activeTab === 'learning' && isCompleted && reviewingSessionId !== session.id ? (
+                ) : isLearner && isCompleted && reviewingSessionId !== session.id ? (
                   <div style={{ marginTop: '0.75rem' }}>
                     <button
                       onClick={() => startReview(session)}
-                      className="btn btn-sm btn-outline"
+                      className="btn btn-sm btn-primary"
                     >
-                      Leave a Review & Rating
+                      Leave Rating & Feedback
                     </button>
                   </div>
                 ) : null}
 
-                {/* Inline Review Form (Learners rating their mentors) */}
-                {activeTab === 'learning' && reviewingSessionId === session.id && (
+                {/* Inline Review Form (Only Learner on completed session, 1 review limit) */}
+                {isLearner && reviewingSessionId === session.id && (
                   <form onSubmit={handleReviewSubmit} style={{
                     marginTop: '1rem',
                     padding: '1.25rem',
@@ -311,8 +399,8 @@ export function LearningHistory() {
                       Evaluate Session with {partner.name}
                     </h4>
 
-                    <div className="form-group">
-                      <label className="form-label">Rating (1 to 5 Stars)</label>
+                    <div className="form-group" style={{ marginBottom: '1rem' }}>
+                      <label className="form-label" style={{ fontWeight: '600' }}>Rating (1 to 5 Stars)</label>
                       <StarRating
                         rating={reviewRating}
                         isInteractive={true}
@@ -320,8 +408,8 @@ export function LearningHistory() {
                       />
                     </div>
 
-                    <div className="form-group">
-                      <label className="form-label" htmlFor="review-comment">
+                    <div className="form-group" style={{ marginBottom: '1rem' }}>
+                      <label className="form-label" htmlFor="review-comment" style={{ fontWeight: '600' }}>
                         Feedback / Review
                       </label>
                       <textarea
@@ -356,6 +444,61 @@ export function LearningHistory() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* Decline Reason Modal */}
+      {decliningSessionId && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.7)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: '1rem',
+          }}
+        >
+          <div className="card" style={{ maxWidth: '480px', width: '100%', padding: '1.75rem' }}>
+            <h3 style={{ fontSize: '1.2rem', fontWeight: '800', marginBottom: '0.75rem' }}>
+              Decline Session Request
+            </h3>
+            <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', marginBottom: '1rem' }}>
+              Please provide a polite reason for declining this request. The learner will be notified and the coordination thread will be closed.
+            </p>
+            <form onSubmit={handleDeclineSession}>
+              <div className="form-group" style={{ marginBottom: '1.25rem' }}>
+                <label className="form-label" style={{ fontWeight: '600' }}>Reason for Declining</label>
+                <textarea
+                  value={declineReason}
+                  onChange={(e) => setDeclineReason(e.target.value)}
+                  placeholder="e.g., Schedule conflict at requested time; please reschedule for next week..."
+                  className="form-textarea"
+                  rows={3}
+                  required
+                />
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
+                <button
+                  type="button"
+                  onClick={() => setDecliningSessionId(null)}
+                  className="btn btn-secondary btn-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isDeclining}
+                  className="btn btn-primary btn-sm"
+                  style={{ backgroundColor: 'var(--color-danger)', borderColor: 'var(--color-danger)' }}
+                >
+                  {isDeclining ? 'Declining...' : 'Confirm Decline'}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
     </div>
