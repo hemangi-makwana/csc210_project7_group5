@@ -93,6 +93,30 @@ export async function completeSession(sessionId) {
 }
 
 /**
+ * Either participant cancels a pending or accepted session.
+ * @param {string} sessionId
+ * @param {string} [reason]
+ * @returns {Promise<{message: string, status: string}>}
+ */
+export async function cancelSession(sessionId, reason = '') {
+  return await request(`/sessions/${sessionId}/cancel`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  });
+}
+
+/**
+ * Fetches authentic submitted learner reviews and bounded reputation summary for a teacher.
+ * @param {string} userId
+ * @returns {Promise<{userId: string, reputation_score: number, review_count: number, reviews: Array}>}
+ */
+export async function getUserReviews(userId) {
+  return await request(`/users/${userId}/reviews`, {
+    method: 'GET',
+  });
+}
+
+/**
  * Fetches real available courses backed by canonical skill_catalog with approved teachers.
  * @param {string} [category]
  * @param {string} [search]

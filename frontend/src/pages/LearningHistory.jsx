@@ -50,6 +50,7 @@ export function LearningHistory() {
   const [reviewingSessionId, setReviewingSessionId] = useState(null);
   const [reviewRating, setReviewRating] = useState(5);
   const [reviewComment, setReviewComment] = useState('');
+  const [reviewFormError, setReviewFormError] = useState(null);
   const [isSubmittingReview, setIsSubmittingReview] = useState(false);
 
   // Decline modal state
@@ -131,31 +132,71 @@ export function LearningHistory() {
     setReviewingSessionId(session.id);
     setReviewRating(5);
     setReviewComment('');
+    setReviewFormError(null);
   }
 
   async function handleReviewSubmit(event) {
     event.preventDefault();
     if (!reviewingSessionId) return;
 
+    const numRating = Number(reviewRating);
+    if (!Number.isInteger(numRating) || numRating < 1 || numRating > 5) {
+      setReviewFormError('Please select a star rating between 1 and 5.');
+      return;
+    }
+
+    const trimmedComment = (reviewComment || '').trim();
+    if (!trimmedComment) {
+      setReviewFormError('Please share brief written feedback about your session.');
+      return;
+    }
+    if (trimmedComment.length > 1000) {
+      setReviewFormError('Written feedback must be 1000 characters or fewer.');
+      return;
+    }
+
     setIsSubmittingReview(true);
+    setReviewFormError(null);
     setErrorMessage(null);
 
     try {
       const payload = {
         sessionId: reviewingSessionId,
-        rating: reviewRating,
-        comment: reviewComment,
+        rating: numRating,
+        comment: trimmedComment,
       };
 
       const response = await submitSessionReview(payload);
-      setSuccessMessage(response.message || 'Review recorded successfully! Teacher reputation updated.');
+      const updatedRep = response.updatedReputation !== undefined && response.updatedReputation !== null
+        ? Number(response.updatedReputation)
+        : null;
+      const repNote = updatedRep !== null && !Number.isNaN(updatedRep)
+        ? ` Teacher's updated reputation score is ★ ${updatedRep.toFixed(2)}.`
+        : '';
 
-      setSessionList(prevSessions =>
-        prevSessions.map(sess => {
+      setSuccessMessage(
+        `${response.message || 'Review submitted!'}${repNote}`
+      );
+
+      setSessionList((prevSessions) =>
+        prevSessions.map((sess) => {
           if (sess.id === reviewingSessionId) {
+            const nextMentor = sess.mentor
+              ? {
+                  ...sess.mentor,
+                  reputation_score: updatedRep !== null ? updatedRep : sess.mentor.reputation_score,
+                  review_count: (Number(sess.mentor.review_count) || 0) + 1,
+                }
+              : sess.mentor;
             return {
               ...sess,
-              review: { rating: reviewRating, comment: reviewComment },
+              mentor: nextMentor,
+              review: {
+                id: response.review?.id || `rev_${Date.now()}`,
+                rating: numRating,
+                comment: trimmedComment,
+                created_at: response.review?.created_at || new Date().toISOString(),
+              },
             };
           }
           return sess;
@@ -163,12 +204,21 @@ export function LearningHistory() {
       );
 
       setReviewingSessionId(null);
+      setReviewComment('');
     } catch (error) {
-      setErrorMessage(error.message || 'Failed to submit review.');
+      setReviewFormError(error.message || 'Failed to submit review.');
     } finally {
       setIsSubmittingReview(false);
     }
   }
+
+  // Compute teacher's review summary from teaching sessions when in Teacher mode
+  const receivedReviews = isTeacher
+    ? sessionList.filter((s) => s.review && Number(s.review.rating) >= 1)
+    : [];
+  const latestTeacherRep = isTeacher && sessionList.length > 0 && sessionList[0].mentor?.reputation_score
+    ? Number(sessionList[0].mentor.reputation_score)
+    : (user?.reputation_score ? Number(user.reputation_score) : null);
 
   return (
     <div className="page" style={{ maxWidth: '850px' }}>
@@ -182,6 +232,43 @@ export function LearningHistory() {
             : 'Track upcoming sessions, coordinate with your mentors, and leave evaluations for completed sessions.'}
         </p>
       </div>
+
+      {/* Teacher Reputation & Feedback Summary Banner */}
+      {isTeacher && !isLoading && (
+        <div
+          className="card"
+          style={{
+            padding: '1rem 1.25rem',
+            marginBottom: '1.25rem',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: '1rem',
+            backgroundColor: 'var(--color-bg-secondary)',
+          }}
+        >
+          <div>
+            <div style={{ fontSize: '0.78rem', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--color-text-muted)' }}>
+              Your Teaching Reputation
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginTop: '0.25rem' }}>
+              <StarRating
+                rating={receivedReviews.length > 0 && latestTeacherRep ? latestTeacherRep : 0}
+                count={receivedReviews.length}
+              />
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '1.5rem', fontSize: '0.85rem', color: 'var(--color-text-secondary)' }}>
+            <div>
+              <strong>{sessionList.filter((s) => s.status === 'completed').length}</strong> Completed Sessions
+            </div>
+            <div>
+              <strong>{receivedReviews.length}</strong> Student {receivedReviews.length === 1 ? 'Review' : 'Reviews'}
+            </div>
+          </div>
+        </div>
+      )}
 
       {successMessage && <SuccessState message={successMessage} onDismiss={() => setSuccessMessage(null)} />}
       {errorMessage && !isLoading && <ErrorState message={errorMessage} onRetry={fetchHistory} />}
@@ -253,9 +340,28 @@ export function LearningHistory() {
                       {(partner.name || 'P').charAt(0).toUpperCase()}
                     </div>
                     <div>
-                      <h3 style={{ fontSize: '1.15rem', fontWeight: '700', color: 'var(--color-text-primary)', margin: 0 }}>
-                        {isTeacher ? `Student: ${partner.name}` : `Teacher: ${partner.name}`}
-                      </h3>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+                        <h3 style={{ fontSize: '1.15rem', fontWeight: '700', color: 'var(--color-text-primary)', margin: 0 }}>
+                          {isTeacher ? `Student: ${partner.name}` : `Teacher: ${partner.name}`}
+                        </h3>
+                        {isLearner && partner.reputation_score !== undefined && (
+                          <span
+                            style={{
+                              fontSize: '0.76rem',
+                              fontWeight: '600',
+                              color: '#f59e0b',
+                              backgroundColor: 'rgba(245, 158, 11, 0.12)',
+                              padding: '0.12rem 0.5rem',
+                              borderRadius: '9999px',
+                            }}
+                            title="Teacher's current bounded reputation score"
+                          >
+                            {Number(partner.review_count) > 0
+                              ? `★ ${Number(partner.reputation_score).toFixed(2)} (${partner.review_count})`
+                              : 'No reviews yet'}
+                          </span>
+                        )}
+                      </div>
                       <p style={{ fontSize: '0.82rem', color: 'var(--color-text-muted)', marginTop: '0.15rem' }}>
                         {formattedDate} • <strong>{isTeacher ? 'Teaching Session' : 'Learning Session'}</strong>
                       </p>
@@ -381,34 +487,48 @@ export function LearningHistory() {
                     backgroundColor: 'var(--color-bg-secondary)',
                     border: '1px solid var(--color-border)',
                     borderRadius: 'var(--radius-md)',
-                    padding: '0.85rem',
-                    marginTop: '0.75rem'
+                    padding: '0.9rem 1rem',
+                    marginTop: '0.85rem'
                   }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
-                      <span style={{ fontSize: '0.85rem', fontWeight: '700', color: 'var(--color-text-primary)' }}>
-                        {isTeacher ? 'Feedback from Learner:' : 'Your Evaluation:'}
-                      </span>
-                      <StarRating rating={session.review.rating} />
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.35rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <span style={{ fontSize: '0.85rem', fontWeight: '700', color: 'var(--color-text-primary)' }}>
+                          {isTeacher ? 'Feedback from Learner:' : 'Your Submitted Evaluation:'}
+                        </span>
+                        <StarRating rating={session.review.rating} />
+                      </div>
+                      {session.review.created_at && (
+                        <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>
+                          Reviewed {new Date(session.review.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                        </span>
+                      )}
                     </div>
                     {session.review.comment && (
-                      <p style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)', fontStyle: 'italic', margin: 0 }}>
+                      <p style={{ fontSize: '0.88rem', color: 'var(--color-text-secondary)', fontStyle: 'italic', margin: 0 }}>
                         "{session.review.comment}"
                       </p>
                     )}
                   </div>
                 ) : isLearner && isCompleted && reviewingSessionId !== session.id ? (
-                  <div style={{ marginTop: '0.75rem' }}>
+                  <div style={{ marginTop: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
                     <button
                       onClick={() => startReview(session)}
                       className="btn btn-sm btn-primary"
                     >
                       Leave Rating & Feedback
                     </button>
+                    <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
+                      Share your rating and written review for this completed session.
+                    </span>
+                  </div>
+                ) : isTeacher && isCompleted && !session.review ? (
+                  <div style={{ marginTop: '0.75rem', fontSize: '0.82rem', color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
+                    Session completed • Awaiting learner feedback
                   </div>
                 ) : null}
 
                 {/* Inline Review Form (Only Learner on completed session, 1 review limit) */}
-                {isLearner && reviewingSessionId === session.id && (
+                {isLearner && isCompleted && !session.review && reviewingSessionId === session.id && (
                   <form onSubmit={handleReviewSubmit} style={{
                     marginTop: '1rem',
                     padding: '1.25rem',
@@ -416,30 +536,63 @@ export function LearningHistory() {
                     borderRadius: 'var(--radius-md)',
                     border: '1px solid var(--color-primary)'
                   }}>
-                    <h4 style={{ fontSize: '0.95rem', fontWeight: '700', marginBottom: '0.75rem', color: 'var(--color-text-primary)' }}>
-                      Evaluate Session with {partner.name}
+                    <h4 style={{ fontSize: '0.95rem', fontWeight: '700', marginBottom: '0.25rem', color: 'var(--color-text-primary)' }}>
+                      Evaluate Completed Session with {partner.name}
                     </h4>
+                    <p style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', marginBottom: '0.85rem' }}>
+                      One evaluation is permitted per completed session. Your rating updates {partner.name}&apos;s mentor reputation.
+                    </p>
+
+                    {reviewFormError && (
+                      <div
+                        style={{
+                          padding: '0.6rem 0.85rem',
+                          marginBottom: '0.85rem',
+                          borderRadius: 'var(--radius-sm)',
+                          backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                          border: '1px solid rgba(239, 68, 68, 0.3)',
+                          color: 'var(--color-danger)',
+                          fontSize: '0.83rem',
+                          fontWeight: '600',
+                        }}
+                      >
+                        {reviewFormError}
+                      </div>
+                    )}
 
                     <div className="form-group" style={{ marginBottom: '1rem' }}>
                       <label className="form-label" style={{ fontWeight: '600' }}>Rating (1 to 5 Stars)</label>
                       <StarRating
                         rating={reviewRating}
                         isInteractive={true}
-                        onRatingChange={(newRating) => setReviewRating(newRating)}
+                        showLabel={true}
+                        onRatingChange={(newRating) => {
+                          setReviewRating(newRating);
+                          if (reviewFormError) setReviewFormError(null);
+                        }}
                       />
                     </div>
 
                     <div className="form-group" style={{ marginBottom: '1rem' }}>
-                      <label className="form-label" htmlFor="review-comment" style={{ fontWeight: '600' }}>
-                        Feedback / Review
-                      </label>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <label className="form-label" htmlFor={`review-comment-${session.id}`} style={{ fontWeight: '600' }}>
+                          Written Feedback
+                        </label>
+                        <span style={{ fontSize: '0.75rem', color: reviewComment.length > 1000 ? 'var(--color-danger)' : 'var(--color-text-muted)' }}>
+                          {reviewComment.length} / 1000
+                        </span>
+                      </div>
                       <textarea
-                        id="review-comment"
+                        id={`review-comment-${session.id}`}
                         className="form-textarea"
-                        rows="2"
+                        rows="3"
+                        maxLength={1000}
                         value={reviewComment}
-                        onChange={(e) => setReviewComment(e.target.value)}
-                        placeholder="Share your experience (e.g. Clear explanations, practical examples)..."
+                        onChange={(e) => {
+                          setReviewComment(e.target.value);
+                          if (reviewFormError) setReviewFormError(null);
+                        }}
+                        placeholder="Share what went well during your session (e.g., clear explanations, practical code walkthroughs, helpful Q&A)..."
                         required
                       />
                     </div>
@@ -454,7 +607,10 @@ export function LearningHistory() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => setReviewingSessionId(null)}
+                        onClick={() => {
+                          setReviewingSessionId(null);
+                          setReviewFormError(null);
+                        }}
                         className="btn btn-secondary btn-sm"
                       >
                         Cancel

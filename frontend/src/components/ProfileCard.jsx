@@ -110,9 +110,26 @@ export function ProfileCard({ user, matchScore = null, matchReason = null, break
       </div>
 
       {/* Bio / Headline */}
-      <p style={{ fontSize: '0.9rem', color: 'var(--color-text-secondary)', marginBottom: '1.25rem', flex: 1, lineHeight: 1.5 }}>
+      <p style={{ fontSize: '0.9rem', color: 'var(--color-text-secondary)', marginBottom: matchReason ? '0.75rem' : '1.25rem', flex: 1, lineHeight: 1.5 }}>
         {user.bio || user.profile_summary || 'Community mentor exchanging technical and academic skills.'}
       </p>
+
+      {/* Match highlight for recommended mentors (user-friendly, free of internal algorithm jargon) */}
+      {matchReason && (
+        <div
+          style={{
+            marginBottom: '1rem',
+            padding: '0.45rem 0.7rem',
+            borderRadius: 'var(--radius-sm)',
+            backgroundColor: 'rgba(37, 99, 235, 0.08)',
+            border: '1px solid rgba(37, 99, 235, 0.2)',
+            fontSize: '0.8rem',
+            color: 'var(--color-text-secondary)',
+          }}
+        >
+          {matchReason}
+        </div>
+      )}
 
       {/* Taught Skills with Teacher Verification Badges */}
       <div style={{ marginBottom: '1rem' }}>

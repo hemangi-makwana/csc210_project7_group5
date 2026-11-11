@@ -23,6 +23,7 @@ import {
   getSkillCatalog,
 } from '../api/skills.js';
 import { Loader, ErrorState, SuccessState } from '../components/Feedback.jsx';
+import { StarRating } from '../components/StarRating.jsx';
 import {
   UserIcon,
   SkillsIcon,
@@ -88,6 +89,9 @@ export function SkillProfile() {
   const [specialization, setSpecialization] = useState('');
   const [teachSkills, setTeachSkills] = useState([]);
   const [learnSkills, setLearnSkills] = useState([]);
+  const [reputationScore, setReputationScore] = useState(null);
+  const [reviewCount, setReviewCount] = useState(0);
+  const [reviews, setReviews] = useState([]);
 
   // Canonical skill catalog
   const [skillCatalog, setSkillCatalog] = useState([]);
@@ -143,6 +147,18 @@ export function SkillProfile() {
       setUsername(profileRes.username || '');
       setSpecialization(profileRes.specialization_domain || '');
       setAvatarUrl(profileRes.avatar_url || null);
+      const loadedReviews = Array.isArray(profileRes.reviews) ? profileRes.reviews : [];
+      setReviews(loadedReviews);
+      setReviewCount(
+        profileRes.review_count !== undefined
+          ? Number(profileRes.review_count) || 0
+          : loadedReviews.length
+      );
+      setReputationScore(
+        profileRes.reputation_score !== undefined
+          ? Number(profileRes.reputation_score)
+          : (profileRes.reputationScore !== undefined ? Number(profileRes.reputationScore) : null)
+      );
 
       const exp = profileRes.work_experience;
       setWorkExperience(Array.isArray(exp) ? exp : (exp ? [exp] : []));
@@ -753,7 +769,7 @@ export function SkillProfile() {
           <div className="card" id="learning">
             <h2 className="card-title">Skills I Want to Learn</h2>
             <p className="card-subtitle">
-              Add subjects you want to study. The recommendation engine matches you with qualified mentors teaching these topics.
+              Add subjects you want to study to discover qualified mentors teaching these topics.
             </p>
 
             <div className="chip-container" style={{ marginBottom: '1.25rem', minHeight: '40px' }}>
@@ -1023,6 +1039,101 @@ export function SkillProfile() {
                 </a>
               )}
             </div>
+          </div>
+
+          {/* Section 8: Reputation & Student Feedback */}
+          <div className="card" id="reviews">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1rem' }}>
+              <div>
+                <h2 className="card-title" style={{ marginBottom: '0.2rem' }}>Teaching Reputation & Student Feedback</h2>
+                <p className="card-subtitle" style={{ marginBottom: 0 }}>
+                  Authentic ratings and written reviews submitted by learners after completed sessions.
+                </p>
+              </div>
+              <div
+                style={{
+                  padding: '0.55rem 0.9rem',
+                  borderRadius: 'var(--radius-md)',
+                  backgroundColor: 'var(--color-bg-secondary)',
+                  border: '1px solid var(--color-border)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.5rem',
+                }}
+              >
+                <StarRating
+                  rating={reviewCount > 0 && reputationScore ? reputationScore : 0}
+                  count={reviewCount}
+                />
+              </div>
+            </div>
+
+            {reviews.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
+                {reviews.map((rev) => (
+                  <div
+                    key={rev.id}
+                    style={{
+                      padding: '0.95rem 1.1rem',
+                      backgroundColor: 'var(--color-bg-secondary)',
+                      borderRadius: 'var(--radius-sm)',
+                      border: '1px solid var(--color-border)',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.4rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+                        <span style={{ fontWeight: '700', fontSize: '0.92rem', color: 'var(--color-text-primary)' }}>
+                          {rev.reviewer_name || 'Learner'}
+                        </span>
+                        <StarRating rating={rev.rating} />
+                        {rev.topic && (
+                          <span
+                            style={{
+                              fontSize: '0.75rem',
+                              padding: '0.1rem 0.5rem',
+                              borderRadius: '9999px',
+                              backgroundColor: 'rgba(99, 102, 241, 0.12)',
+                              color: 'var(--color-primary)',
+                              fontWeight: '600',
+                            }}
+                          >
+                            {rev.topic}
+                          </span>
+                        )}
+                      </div>
+                      {rev.created_at && (
+                        <span style={{ fontSize: '0.76rem', color: 'var(--color-text-muted)' }}>
+                          {new Date(rev.created_at).toLocaleDateString('en-US', {
+                            month: 'short',
+                            day: 'numeric',
+                            year: 'numeric',
+                          })}
+                        </span>
+                      )}
+                    </div>
+                    {rev.comment && (
+                      <p style={{ fontSize: '0.88rem', color: 'var(--color-text-secondary)', fontStyle: 'italic', margin: 0 }}>
+                        "{rev.comment}"
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div
+                style={{
+                  padding: '1rem',
+                  borderRadius: 'var(--radius-sm)',
+                  backgroundColor: 'var(--color-bg-secondary)',
+                  border: '1px dashed var(--color-border)',
+                  fontSize: '0.86rem',
+                  color: 'var(--color-text-muted)',
+                  textAlign: 'center',
+                }}
+              >
+                No student reviews yet. Your teaching reputation updates automatically when learners submit feedback on completed sessions.
+              </div>
+            )}
           </div>
 
           {/* Save Profile Button */}

@@ -95,7 +95,7 @@ export function Recommendations() {
         </div>
       )}
 
-      {isLoading && <Loader message="Computing mentor recommendation rankings..." />}
+      {isLoading && <Loader message="Loading recommended mentors..." />}
 
       {errorMessage && !isLoading && (
         <ErrorState message={errorMessage} onRetry={fetchRecommendations} />
@@ -105,7 +105,7 @@ export function Recommendations() {
         <EmptyState
           icon={<SparklesIcon size={36} />}
           title="No recommendations currently available"
-          description="Add more learning goals to your profile to help the matching algorithm find compatible teachers."
+          description="Add learning goals to your profile to discover mentors teaching those topics."
           actionButton={
             <Link to="/profile" className="btn btn-primary btn-sm">
               Update Wanted Skills
@@ -117,7 +117,7 @@ export function Recommendations() {
       {!isLoading && !errorMessage && recommendationList.length > 0 && (
         <>
           <div style={{ marginBottom: '1.25rem', color: 'var(--color-text-muted)', fontSize: '0.9rem' }}>
-            Top {recommendationList.length} recommended mentors for your profile
+            Top {recommendationList.length} recommended mentors for your learning goals
           </div>
 
           <div className="grid grid-cols-2" style={{ gap: '1.5rem', marginBottom: '3rem' }}>
@@ -131,6 +131,7 @@ export function Recommendations() {
                 avatar_url: mentor.avatar_url || rec.avatar_url || null,
                 is_demo: mentor.is_demo !== undefined ? mentor.is_demo : Boolean(rec.is_demo),
                 reputation_score: mentor.reputationScore || mentor.reputation_score || rec.reputationScore || 5.0,
+                review_count: mentor.review_count !== undefined ? mentor.review_count : (rec.review_count !== undefined ? rec.review_count : null),
                 skills: mentor.skills || rec.skills || (mentor.teaches ? mentor.teaches.map(t => ({ skill_name: t, type: 'teach' })) : []),
               };
 

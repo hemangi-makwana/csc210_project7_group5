@@ -80,32 +80,34 @@ class ReputationEngine {
     const tempMap = new Map();
 
     for (const rev of reviewRows) {
-      if (!rev || !rev.mentor_id) continue;
-      const tId = String(rev.mentor_id);
+      const mentorId = rev && (rev.mentor_id || rev.mentorId);
+      if (!mentorId) continue;
+      const tId = String(mentorId);
       const rating = Number(rev.rating);
 
       if (!tempMap.has(tId)) {
-        tempMap.set(tId, []);
+        tempMap.set(tId, { ratings: [], reviews: [] });
       }
       if (!isNaN(rating) && rating >= 1 && rating <= 5) {
-        tempMap.get(tId).push(rating);
+        const entry = tempMap.get(tId);
+        entry.ratings.push(rating);
+        entry.reviews.push({
+          id: rev.id || null,
+          session_id: rev.session_id || rev.sessionId || null,
+          reviewer_id: rev.reviewer_id || rev.reviewerId || null,
+          reviewer_name: rev.reviewer_name || null,
+          mentor_id: tId,
+          rating,
+          comment: rev.comment || "",
+          topic: rev.topic || null,
+          created_at: rev.created_at || null,
+        });
       }
     }
 
     // Insert aggregated objects into Hash Table
-    for (const [teacherId, ratings] of tempMap.entries()) {
-      const boundedScore = this.calculateBoundedScore(ratings);
-      const rawAvg = ratings.length > 0 ? ratings.reduce((a, b) => a + b, 0) / ratings.length : 5.0;
-
-      const record = {
-        teacherId,
-        reviewCount: ratings.length,
-        ratings,
-        rawAverage: Math.round(rawAvg * 100) / 100,
-        boundedReputation: boundedScore,
-      };
-
-      this.teacherTable.insert(teacherId, record);
+    for (const [teacherId, data] of tempMap.entries()) {
+      this.indexTeacherReviews(teacherId, data.ratings, data.reviews);
     }
   }
 
@@ -193,14 +195,20 @@ class ReputationEngine {
   /**
    * Indexes a teacher's reviews directly into the Hash Table.
    */
-  indexTeacherReviews(teacherId, ratings) {
-    const validRatings = Array.isArray(ratings) ? ratings : [];
+  indexTeacherReviews(teacherId, ratings, reviews = []) {
+    const validRatings = (Array.isArray(ratings) ? ratings : [])
+      .map((r) => Number(r))
+      .filter((r) => !isNaN(r) && r >= 1 && r <= 5);
     const boundedScore = this.calculateBoundedScore(validRatings);
-    const rawAvg = validRatings.length > 0 ? validRatings.reduce((a, b) => a + b, 0) / validRatings.length : 5.0;
+    const rawAvg =
+      validRatings.length > 0
+        ? validRatings.reduce((a, b) => a + b, 0) / validRatings.length
+        : this.priorRating;
     const record = {
       teacherId: String(teacherId),
       reviewCount: validRatings.length,
       ratings: validRatings,
+      reviews: Array.isArray(reviews) ? reviews : [],
       rawAverage: Math.round(rawAvg * 100) / 100,
       boundedReputation: boundedScore,
       reputationScore: boundedScore,
@@ -220,8 +228,18 @@ class ReputationEngine {
    */
   async updateTeacherReputationFromDatabase(teacherId, queryFn) {
     if (!teacherId || !queryFn) return this.priorRating;
-    const revRes = await queryFn("SELECT rating FROM reviews WHERE mentor_id = $1", [String(teacherId)]);
-    const ratings = (revRes.rows || []).map((r) => Number(r.rating)).filter((r) => !isNaN(r) && r >= 1 && r <= 5);
+    const revRes = await queryFn(
+      `SELECT r.id, r.session_id, r.reviewer_id, r.mentor_id, r.rating, r.comment, r.created_at,
+              u.name AS reviewer_name, sb.topic AS topic
+       FROM reviews r
+       LEFT JOIN users u ON r.reviewer_id = u.id
+       LEFT JOIN session_bookings sb ON r.session_id = sb.id
+       WHERE r.mentor_id = $1
+       ORDER BY r.created_at DESC`,
+      [String(teacherId)]
+    );
+    const rows = revRes.rows || [];
+    const ratings = rows.map((r) => Number(r.rating)).filter((r) => !isNaN(r) && r >= 1 && r <= 5);
     const boundedScore = this.calculateBoundedScore(ratings);
 
     await queryFn(
@@ -229,7 +247,7 @@ class ReputationEngine {
       [boundedScore, String(teacherId)]
     );
 
-    this.indexTeacherReviews(String(teacherId), ratings);
+    this.indexTeacherReviews(String(teacherId), ratings, rows);
     return boundedScore;
   }
 

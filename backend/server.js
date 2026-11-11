@@ -869,37 +869,85 @@ async function initializeDatabaseAndDsa() {
         }
       }
 
-      // Populate Graph edges from session bookings
+      // Populate Graph edges and FIFO Queue from session bookings
+      bookingQueue.clear();
       const bookingsRes = await query(`
-        SELECT mentor_id, learner_id, status FROM session_bookings
+        SELECT id, mentor_id, learner_id, scheduled_at, status, topic, notes, conversation_id, created_at
+        FROM session_bookings
         WHERE mentor_id IS NOT NULL AND learner_id IS NOT NULL
+        ORDER BY created_at ASC
       `);
       if (bookingsRes.rows) {
         for (const b of bookingsRes.rows) {
           mentorGraph.addEdge(b.learner_id, b.mentor_id, 1, "mentorship", true);
+          if (b.status === "pending" || b.status === "queued") {
+            bookingQueue.enqueue({
+              id: b.id,
+              bookingId: b.id,
+              mentorId: b.mentor_id,
+              learnerId: b.learner_id,
+              scheduledAt: b.scheduled_at,
+              status: b.status,
+              topic: b.topic || "Mentoring Session",
+              notes: b.notes || "",
+              conversationId: b.conversation_id || null,
+              createdAt: b.created_at,
+            });
+          }
         }
       }
 
-      // Populate Graph edge weights from reviews
+      // Populate ReputationEngine Hash Table and Graph edge weights from PostgreSQL reviews
       const reviewsRes = await query(`
-        SELECT mentor_id, reviewer_id, rating FROM reviews
-        WHERE mentor_id IS NOT NULL AND reviewer_id IS NOT NULL
+        SELECT r.id, r.session_id, r.mentor_id, r.reviewer_id, r.rating, r.comment, r.created_at,
+               u.name AS reviewer_name, sb.topic AS topic
+        FROM reviews r
+        LEFT JOIN users u ON r.reviewer_id = u.id
+        LEFT JOIN session_bookings sb ON r.session_id = sb.id
+        WHERE r.mentor_id IS NOT NULL AND r.reviewer_id IS NOT NULL
+        ORDER BY r.created_at DESC
       `);
       if (reviewsRes.rows) {
+        reputationEngine.rebuildFromReviews(reviewsRes.rows);
+        const reviewedMentors = new Set();
         for (const r of reviewsRes.rows) {
           mentorGraph.updateEdgeWeight(r.reviewer_id, r.mentor_id, r.rating, true);
+          reviewedMentors.add(String(r.mentor_id));
+        }
+        // Reconcile users.reputation_score in PostgreSQL for teachers who have persisted reviews
+        for (const teacherId of reviewedMentors) {
+          const repRecord = reputationEngine.getTeacherReputation(teacherId);
+          if (repRecord && repRecord.reviewCount > 0) {
+            await query(
+              "UPDATE users SET reputation_score = $1 WHERE id = $2 AND reputation_score IS DISTINCT FROM $1",
+              [repRecord.boundedReputation, teacherId]
+            ).catch(() => {});
+            const vData = mentorGraph.getVertex(teacherId);
+            if (vData) {
+              mentorGraph.addVertex(teacherId, {
+                ...vData,
+                reputationScore: repRecord.boundedReputation,
+              });
+            }
+          }
         }
       }
 
       if (result.rows && result.rows.length > 0) {
+        skillHashTable.clear();
         for (const row of result.rows) {
+          const repRecord = reputationEngine.getTeacherReputation(row.id);
+          const effectiveReputation =
+            repRecord && repRecord.reviewCount > 0
+              ? repRecord.boundedReputation
+              : parseFloat(row.reputation_score) || 5.0;
           const mentorRecord = {
             userId: row.id,
             id: row.id,
             name: row.name,
             level: row.level,
             skills: row.all_skills || [row.skill_name],
-            reputationScore: parseFloat(row.reputation_score) || 5.0,
+            reputationScore: effectiveReputation,
           };
           skillHashTable.insert(row.skill_name, mentorRecord);
         }
@@ -934,6 +982,88 @@ if (isPoolInitialized()) {
 // ----------------------------------------------------------------------------
 // HELPER FUNCTIONS
 // ----------------------------------------------------------------------------
+
+/**
+ * Reconciles the in-memory FIFO bookingQueue with pending/queued session_bookings in PostgreSQL.
+ */
+async function reconcileBookingQueueFromDatabase() {
+  try {
+    const pendingRes = await query(`
+      SELECT id, mentor_id, learner_id, scheduled_at, status, topic, notes, conversation_id, created_at
+      FROM session_bookings
+      WHERE status IN ('pending', 'queued')
+      ORDER BY created_at ASC
+    `);
+    bookingQueue.clear();
+    for (const b of pendingRes.rows || []) {
+      bookingQueue.enqueue({
+        id: b.id,
+        bookingId: b.id,
+        mentorId: b.mentor_id,
+        learnerId: b.learner_id,
+        scheduledAt: b.scheduled_at,
+        status: b.status,
+        topic: b.topic || "Mentoring Session",
+        notes: b.notes || "",
+        conversationId: b.conversation_id || null,
+        createdAt: b.created_at,
+      });
+    }
+  } catch (err) {
+    // Non-fatal if DB unreachable
+  }
+}
+
+/**
+ * Reconciles a teacher's reputation, teachable skills, and vertex metadata across
+ * ReputationEngine (HashTable), skillHashTable (HashTable), and mentorGraph (Graph)
+ * using PostgreSQL as the authoritative source of truth.
+ */
+async function reconcileTeacherDsaState(teacherId) {
+  if (!teacherId) return;
+  try {
+    const userRes = await query(
+      `SELECT id, name, role, bio, reputation_score FROM users WHERE id = $1`,
+      [String(teacherId)]
+    );
+    if (!userRes.rows || userRes.rows.length === 0) return;
+    const u = userRes.rows[0];
+
+    const skillsRes = await query(
+      `SELECT skill_name, level, type, is_verified, verified_at
+       FROM skills
+       WHERE user_id = $1 AND type = 'teach'
+       ORDER BY id ASC`,
+      [String(teacherId)]
+    );
+    const teachSkills = skillsRes.rows || [];
+    const repRecord = reputationEngine.getTeacherReputation(String(teacherId));
+    const effectiveRep =
+      repRecord && repRecord.reviewCount > 0
+        ? repRecord.boundedReputation
+        : parseFloat(u.reputation_score) || 5.0;
+
+    mentorGraph.addVertex(u.id, {
+      name: u.name,
+      role: u.role,
+      skills: teachSkills,
+      reputationScore: effectiveRep,
+    });
+
+    for (const s of teachSkills) {
+      skillHashTable.insert(s.skill_name, {
+        userId: u.id,
+        id: u.id,
+        name: u.name,
+        level: s.level || "intermediate",
+        skills: teachSkills.map((ts) => ts.skill_name),
+        reputationScore: effectiveRep,
+      });
+    }
+  } catch (err) {
+    // Non-fatal during background reconciliation
+  }
+}
 
 /**
  * Sorts an array of mentors by their proficiency level:
@@ -1123,18 +1253,64 @@ application.get("/api/skills/catalog", async (request, response) => {
 application.get("/api/skills/search", async (request, response) => {
   try {
     const searchSkillName = request.query.query;
-
-    if (!searchSkillName || typeof searchSkillName !== "string" || searchSkillName.trim() === "") {
-      return response.status(200).json({ mentors: [] });
-    }
-
-    const cleanQuery = searchSkillName.trim();
+    const cleanQuery = typeof searchSkillName === "string" ? searchSkillName.trim() : "";
     const conn = await checkConnection();
 
+    // Consult the Hash Table index in O(1) average time when a specific skill keyword is provided
+    const hashTableMatches = cleanQuery ? skillHashTable.lookup(cleanQuery) : [];
+    const hashMatchedIds = new Set((hashTableMatches || []).map((m) => String(m.userId || m.id)));
+
     if (conn.reachable) {
+      if (!cleanQuery) {
+        const allResult = await query(
+          `SELECT u.id, u.id as "userId", u.name, u.role, u.bio, u.profile_summary,
+                  u.reputation_score as "reputationScore", u.reputation_score, u.is_demo, u.avatar_url,
+                  (SELECT COUNT(*)::int FROM reviews r WHERE r.mentor_id = u.id) as review_count,
+                  COALESCE(array_agg(s.skill_name) FILTER (WHERE s.type = 'teach'), '{}') as skills,
+                  COALESCE(
+                    jsonb_agg(
+                      jsonb_build_object(
+                        'skill_name', s.skill_name,
+                        'level', s.level,
+                        'type', s.type,
+                        'is_verified', COALESCE(s.is_verified, FALSE)
+                      )
+                    ) FILTER (WHERE s.type = 'teach'),
+                    '[]'::jsonb
+                  ) as skill_entries,
+                  BOOL_OR(COALESCE(s.is_verified, FALSE)) as is_verified
+           FROM users u
+           JOIN skills s ON u.id = s.user_id
+           WHERE s.type = 'teach'
+           GROUP BY u.id, u.name, u.role, u.bio, u.profile_summary, u.reputation_score, u.is_demo, u.avatar_url
+           ORDER BY BOOL_OR(COALESCE(s.is_verified, FALSE)) DESC, u.reputation_score DESC`
+        );
+
+        const mentors = (allResult.rows || []).map((row) => {
+          const repData = reputationEngine.getTeacherReputation(row.id);
+          const repScore =
+            repData && repData.reviewCount > 0
+              ? repData.boundedReputation
+              : Math.min(5.0, Math.max(1.0, parseFloat(row.reputation_score) || 5.0));
+          return {
+            ...row,
+            reputationScore: repScore,
+            reputation_score: repScore,
+            review_count: row.review_count || (repData ? repData.reviewCount : 0),
+          };
+        });
+
+        return response.status(200).json({
+          mentors,
+          source: "postgresql",
+          search: "",
+        });
+      }
+
       const dbResult = await query(
         `SELECT u.id, u.id as "userId", u.name, u.role, u.bio, u.profile_summary,
-                u.reputation_score as "reputationScore", u.is_demo, u.avatar_url,
+                u.reputation_score as "reputationScore", u.reputation_score, u.is_demo, u.avatar_url,
+                (SELECT COUNT(*)::int FROM reviews r WHERE r.mentor_id = u.id) as review_count,
                 COALESCE(array_agg(s.skill_name) FILTER (WHERE s.type = 'teach'), '{}') as skills,
                 COALESCE(
                   jsonb_agg(
@@ -1171,8 +1347,23 @@ application.get("/api/skills/search", async (request, response) => {
         }
       }
 
+      const mentors = (dbResult.rows || []).map((row) => {
+        const repData = reputationEngine.getTeacherReputation(row.id);
+        const repScore =
+          repData && repData.reviewCount > 0
+            ? repData.boundedReputation
+            : Math.min(5.0, Math.max(1.0, parseFloat(row.reputation_score) || 5.0));
+        return {
+          ...row,
+          reputationScore: repScore,
+          reputation_score: repScore,
+          review_count: row.review_count || (repData ? repData.reviewCount : 0),
+          indexedInHashTable: hashMatchedIds.has(String(row.id)),
+        };
+      });
+
       return response.status(200).json({
-        mentors: dbResult.rows || [],
+        mentors,
         source: "postgresql",
         search: cleanQuery,
         suggestion,
@@ -1180,8 +1371,12 @@ application.get("/api/skills/search", async (request, response) => {
       });
     }
 
+    if (!cleanQuery) {
+      return response.status(200).json({ mentors: [] });
+    }
+
     // Step 1: Use Hash Table fallback to find mentors who have this skill in O(1) average time
-    const matchingMentors = skillHashTable.lookup(cleanQuery);
+    const matchingMentors = hashTableMatches;
 
     // Step 2: Sort mentors by expertise level (expert > intermediate > beginner)
     const sortedMentors = sortMentorsByLevel(matchingMentors);
@@ -1399,6 +1594,7 @@ application.post("/api/sessions/:id/accept", authenticateToken, async (request, 
     }
 
     await query("UPDATE session_bookings SET status = 'accepted' WHERE id = $1", [sessionId]);
+    await reconcileBookingQueueFromDatabase();
 
     // Notify learner
     await query(
@@ -1462,14 +1658,17 @@ application.post("/api/sessions/:id/decline", authenticateToken, async (request,
       });
     }
 
-    const declineReason = reason && typeof reason === "string" && reason.trim() !== ""
-      ? reason.trim()
+    const rawDeclineReason =
+      reason !== undefined ? reason : request.body.decline_reason || request.body.declineReason;
+    const declineReason = rawDeclineReason && typeof rawDeclineReason === "string" && rawDeclineReason.trim() !== ""
+      ? rawDeclineReason.trim()
       : "Teacher unavailable at requested time.";
 
     await query(
       "UPDATE session_bookings SET status = 'declined', declined_reason = $1 WHERE id = $2",
       [declineReason, sessionId]
     );
+    await reconcileBookingQueueFromDatabase();
 
     // Close the linked conversation without deleting history
     if (session.conversation_id) {
@@ -1509,6 +1708,71 @@ application.post("/api/sessions/:id/decline", authenticateToken, async (request,
     });
   } catch (error) {
     console.error("Error declining session booking:", error);
+    return response.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * ENDPOINT: POST /api/sessions/:id/cancel
+ * Either session participant cancels a pending or accepted session.
+ */
+application.post("/api/sessions/:id/cancel", authenticateToken, async (request, response) => {
+  try {
+    const sessionId = request.params.id;
+    const userId = request.user.userId;
+    const cancelReason = (request.body.reason || request.body.cancel_reason || "Cancelled by participant").trim();
+
+    const sessRes = await query("SELECT * FROM session_bookings WHERE id = $1", [sessionId]);
+    if (sessRes.rows.length === 0) {
+      return response.status(404).json({ error: "Session booking not found." });
+    }
+
+    const session = sessRes.rows[0];
+    if (session.mentor_id !== userId && session.learner_id !== userId) {
+      return response.status(403).json({ error: "Only session participants may cancel this session." });
+    }
+
+    if (session.status === "completed" || session.status === "declined" || session.status === "cancelled") {
+      return response.status(400).json({
+        error: `Cannot cancel a session that is already "${session.status}".`,
+      });
+    }
+
+    await query(
+      `UPDATE session_bookings
+       SET status = 'cancelled', declined_reason = $1
+       WHERE id = $2`,
+      [cancelReason, sessionId]
+    );
+
+    if (session.conversation_id) {
+      await query("UPDATE conversations SET status = 'closed' WHERE id = $1", [session.conversation_id]);
+    }
+
+    await reconcileBookingQueueFromDatabase();
+
+    const peerId = session.mentor_id === userId ? session.learner_id : session.mentor_id;
+    const peerView = session.mentor_id === userId ? "learning" : "teaching";
+    await query(
+      `INSERT INTO notifications (user_id, type, title, message, link)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        peerId,
+        "booking_cancelled",
+        "Session Booking Cancelled",
+        `The session for "${session.topic}" was cancelled: ${cancelReason}`,
+        `/history?view=${peerView}`,
+      ]
+    ).catch(() => {});
+
+    return response.status(200).json({
+      success: true,
+      message: "Session booking cancelled.",
+      status: "cancelled",
+      booking: { id: sessionId, status: "cancelled" },
+    });
+  } catch (error) {
+    console.error("Error cancelling session booking:", error);
     return response.status(500).json({ error: error.message });
   }
 });
@@ -1581,6 +1845,7 @@ application.get("/api/users/all", async (request, response) => {
         SELECT u.id, u.name, u.role, u.bio, u.profile_summary, u.specialization_domain,
                u.work_experience, u.social_profiles, u.avatar_url, COALESCE(u.is_demo, FALSE) as is_demo,
                u.reputation_score,
+               (SELECT COUNT(*)::int FROM reviews r WHERE r.mentor_id = u.id) as review_count,
                COALESCE(array_agg(s.skill_name) FILTER (WHERE s.type = 'teach' AND s.skill_name IS NOT NULL), '{}') as skills,
                COALESCE(
                  json_agg(
@@ -1595,22 +1860,31 @@ application.get("/api/users/all", async (request, response) => {
       `);
 
       if (dbResult.rows && dbResult.rows.length > 0) {
-        const mentorList = dbResult.rows.map((row) => ({
-          id: row.id,
-          userId: row.id,
-          name: row.name,
-          role: row.role || "Peer Mentor",
-          skills: row.skill_entries && row.skill_entries.length > 0 ? row.skill_entries : (row.skills || []),
-          bio: row.bio || row.profile_summary || "",
-          profile_summary: row.profile_summary || row.bio || "",
-          specialization_domain: row.specialization_domain || null,
-          work_experience: row.work_experience || [],
-          social_profiles: row.social_profiles || {},
-          avatar_url: row.avatar_url || null,
-          is_demo: Boolean(row.is_demo),
-          reputationScore: parseFloat(row.reputation_score) || 5.0,
-          reputation_score: parseFloat(row.reputation_score) || 5.0,
-        }));
+        const mentorList = dbResult.rows.map((row) => {
+          const repSummary = reputationEngine.getTeacherReputation(row.id);
+          const dbRep = parseFloat(row.reputation_score);
+          const effectiveRep = repSummary.reviewCount > 0
+            ? repSummary.boundedReputation
+            : Math.min(5.0, Math.max(1.0, !isNaN(dbRep) ? dbRep : 4.0));
+          return {
+            id: row.id,
+            userId: row.id,
+            name: row.name,
+            role: row.role || "Peer Mentor",
+            skills: row.skill_entries && row.skill_entries.length > 0 ? row.skill_entries : (row.skills || []),
+            bio: row.bio || row.profile_summary || "",
+            profile_summary: row.profile_summary || row.bio || "",
+            specialization_domain: row.specialization_domain || null,
+            work_experience: row.work_experience || [],
+            social_profiles: row.social_profiles || {},
+            avatar_url: row.avatar_url || null,
+            is_demo: Boolean(row.is_demo),
+            reputationScore: effectiveRep,
+            reputation_score: effectiveRep,
+            review_count: parseInt(row.review_count, 10) || 0,
+            reviewCount: parseInt(row.review_count, 10) || 0,
+          };
+        });
 
         return response.status(200).json({
           mentors: mentorList,
@@ -1768,19 +2042,30 @@ application.put("/api/users/:userId/skills", async (request, response) => {
         });
       }
 
-      // Step 2b: Query verified passing quiz records from quiz_attempts
-      // Requirement: Only verified skills returned by backend may display as verified.
-      // Must check that a passing attempt exists in quiz_attempts AND was not forfeited.
-      const passingAttempts = await client.query(
-        `SELECT LOWER(skill_name) as lower_skill, MAX(created_at) as passed_at
-         FROM quiz_attempts
-         WHERE user_id = $1 AND passed = TRUE AND forfeited IS NOT TRUE AND answers_revealed IS NOT TRUE
+      // Step 2b: Preserve verified status from existing verified skills or approved teacher_verification_applications
+      const verifiedSkillMap = new Map();
+      const existingVerifiedSkills = await client.query(
+        `SELECT LOWER(skill_name) as lower_skill, MAX(verified_at) as verified_at
+         FROM skills
+         WHERE user_id = $1 AND type = 'teach' AND is_verified = TRUE
          GROUP BY LOWER(skill_name)`,
         [targetUserId]
       );
-      const verifiedQuizMap = new Map();
-      for (const p of passingAttempts.rows) {
-        verifiedQuizMap.set(p.lower_skill, p.passed_at);
+      for (const row of existingVerifiedSkills.rows) {
+        verifiedSkillMap.set(row.lower_skill, row.verified_at || new Date());
+      }
+
+      const approvedApps = await client.query(
+        `SELECT LOWER(skill_name) as lower_skill, MAX(COALESCE(reviewed_at, updated_at, created_at)) as approved_at
+         FROM teacher_verification_applications
+         WHERE user_id = $1 AND status = 'approved'
+         GROUP BY LOWER(skill_name)`,
+        [targetUserId]
+      );
+      for (const row of approvedApps.rows) {
+        if (!verifiedSkillMap.has(row.lower_skill)) {
+          verifiedSkillMap.set(row.lower_skill, row.approved_at || new Date());
+        }
       }
 
       // Delete existing skills for this user and insert validated skills list
@@ -1790,8 +2075,8 @@ application.put("/api/users/:userId/skills", async (request, response) => {
       for (const skill of validatedIncomingSkills) {
         const lowerName = skill.skillName.toLowerCase();
         // Server-side verification enforcement: user cannot spoof is_verified
-        const isVerified = skill.type === "teach" && verifiedQuizMap.has(lowerName);
-        const verifiedAt = isVerified ? (verifiedQuizMap.get(lowerName) || new Date()) : null;
+        const isVerified = skill.type === "teach" && verifiedSkillMap.has(lowerName);
+        const verifiedAt = isVerified ? (verifiedSkillMap.get(lowerName) || new Date()) : null;
 
         await client.query(
           `INSERT INTO skills (user_id, skill_name, level, type, is_verified, verified_at, forfeited)
@@ -1860,32 +2145,8 @@ application.put("/api/users/:userId/skills", async (request, response) => {
       client.release();
     }
 
-    // Step 3: Dynamically re-index newly saved teachable skills into the Hash Table for instant O(1) search
-    for (const skill of incomingSkills) {
-      if (skill.type !== "teach") continue;
-
-      const skillName = skill.skill_name || skill.skillName;
-      if (!skillName) continue;
-
-      const mentorRecord = {
-        userId: updatedUser.userId,
-        id: updatedUser.userId,
-        name: updatedUser.name,
-        level: skill.level || "beginner",
-        skills: updatedUser.skills,
-        reputationScore: updatedUser.reputationScore,
-      };
-
-      skillHashTable.insert(skillName, mentorRecord);
-    }
-
-    // Step 4: Update Graph vertex metadata with updated skills and reputation (DSA Feature)
-    mentorGraph.addVertex(updatedUser.userId, {
-      name: updatedUser.name,
-      role: updatedUser.role,
-      skills: updatedUser.skills,
-      reputationScore: updatedUser.reputationScore,
-    });
+    // Step 3: Reconcile in-memory HashTable and Graph vertex with PostgreSQL
+    await reconcileTeacherDsaState(updatedUser.userId);
 
     return response.status(200).json({
       message: "Profile skills and details saved successfully in PostgreSQL database!",
@@ -2188,7 +2449,7 @@ application.post("/api/users/:userId/avatar", authenticateToken, (request, respo
 
 /**
  * ENDPOINT 4C: GET /api/users/:userId/profile
- * Retrieves a user's full profile details including skills from PostgreSQL.
+ * Retrieves a user's full profile details including skills and submitted reviews from PostgreSQL.
  */
 application.get("/api/users/:userId/profile", async (request, response) => {
   try {
@@ -2215,6 +2476,24 @@ application.get("/api/users/:userId/profile", async (request, response) => {
 
       if (dbResult.rows.length > 0) {
         const u = dbResult.rows[0];
+        const reviewsRes = await query(
+          `SELECT r.id, r.session_id, r.reviewer_id, r.mentor_id, r.rating, r.comment, r.created_at,
+                  rev.name as reviewer_name, rev.avatar_url as reviewer_avatar,
+                  sb.topic as topic
+           FROM reviews r
+           LEFT JOIN users rev ON r.reviewer_id = rev.id
+           LEFT JOIN session_bookings sb ON r.session_id = sb.id
+           WHERE r.mentor_id = $1
+           ORDER BY r.created_at DESC, r.id DESC`,
+          [targetUserId]
+        );
+        const reviews = reviewsRes.rows || [];
+        const repSummary = reputationEngine.getTeacherReputation(targetUserId);
+        const dbRep = parseFloat(u.reputation_score);
+        const effectiveRep = reviews.length > 0
+          ? (repSummary.reviewCount > 0 ? repSummary.boundedReputation : ReputationEngine.calculateBoundedScore(reviews.map((r) => r.rating)))
+          : Math.min(5.0, Math.max(1.0, !isNaN(dbRep) ? dbRep : 4.0));
+
         return response.status(200).json({
           id: u.id,
           userId: u.id,
@@ -2228,7 +2507,11 @@ application.get("/api/users/:userId/profile", async (request, response) => {
           work_experience: u.work_experience || [],
           social_profiles: u.social_profiles || {},
           avatar_url: u.avatar_url || null,
-          reputation_score: parseFloat(u.reputation_score) || 5.0,
+          reputation_score: effectiveRep,
+          reputationScore: effectiveRep,
+          review_count: reviews.length,
+          reviewCount: reviews.length,
+          reviews,
           active_mode: u.active_mode || "learner",
           can_teach: u.can_teach !== false,
           can_learn: u.can_learn !== false,
@@ -2252,9 +2535,60 @@ application.get("/api/users/:userId/profile", async (request, response) => {
 });
 
 /**
+ * ENDPOINT 4D: GET /api/users/:userId/reviews
+ * Retrieves authentic learner feedback and bounded reputation summary for a teacher.
+ */
+application.get("/api/users/:userId/reviews", async (request, response) => {
+  try {
+    const targetUserId = request.params.userId;
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable.", reviews: [] });
+    }
+
+    const userRes = await query("SELECT id, name, reputation_score FROM users WHERE id = $1", [targetUserId]);
+    if (userRes.rows.length === 0) {
+      return response.status(404).json({ error: "User not found." });
+    }
+
+    const reviewsRes = await query(
+      `SELECT r.id, r.session_id, r.reviewer_id, r.mentor_id, r.rating, r.comment, r.created_at,
+              rev.name as reviewer_name, rev.avatar_url as reviewer_avatar,
+              sb.topic as topic
+       FROM reviews r
+       LEFT JOIN users rev ON r.reviewer_id = rev.id
+       LEFT JOIN session_bookings sb ON r.session_id = sb.id
+       WHERE r.mentor_id = $1
+       ORDER BY r.created_at DESC, r.id DESC`,
+      [targetUserId]
+    );
+
+    const reviews = reviewsRes.rows || [];
+    const repSummary = reputationEngine.getTeacherReputation(targetUserId);
+    const dbRep = parseFloat(userRes.rows[0].reputation_score);
+    const effectiveRep = reviews.length > 0
+      ? (repSummary.reviewCount > 0 ? repSummary.boundedReputation : ReputationEngine.calculateBoundedScore(reviews.map((r) => r.rating)))
+      : Math.min(5.0, Math.max(1.0, !isNaN(dbRep) ? dbRep : 4.0));
+
+    return response.status(200).json({
+      userId: targetUserId,
+      reputation_score: effectiveRep,
+      reputationScore: effectiveRep,
+      review_count: reviews.length,
+      reviewCount: reviews.length,
+      rawAverage: repSummary.rawAverage || null,
+      reviews,
+    });
+  } catch (error) {
+    console.error("Error fetching user reviews:", error);
+    return response.status(500).json({ error: "Failed to fetch user reviews." });
+  }
+});
+
+/**
  * ENDPOINT 5: GET /api/users/:userId
  *
- * Retrieves a user's full profile and skills from PostgreSQL.
+ * Retrieves a user's full profile, skills, and reviews from PostgreSQL.
  */
 application.get("/api/users/:userId", async (request, response) => {
   try {
@@ -2281,6 +2615,24 @@ application.get("/api/users/:userId", async (request, response) => {
 
       if (dbResult.rows.length > 0) {
         const u = dbResult.rows[0];
+        const reviewsRes = await query(
+          `SELECT r.id, r.session_id, r.reviewer_id, r.mentor_id, r.rating, r.comment, r.created_at,
+                  rev.name as reviewer_name, rev.avatar_url as reviewer_avatar,
+                  sb.topic as topic
+           FROM reviews r
+           LEFT JOIN users rev ON r.reviewer_id = rev.id
+           LEFT JOIN session_bookings sb ON r.session_id = sb.id
+           WHERE r.mentor_id = $1
+           ORDER BY r.created_at DESC, r.id DESC`,
+          [targetUserId]
+        );
+        const reviews = reviewsRes.rows || [];
+        const repSummary = reputationEngine.getTeacherReputation(targetUserId);
+        const dbRep = parseFloat(u.reputation_score);
+        const effectiveRep = reviews.length > 0
+          ? (repSummary.reviewCount > 0 ? repSummary.boundedReputation : ReputationEngine.calculateBoundedScore(reviews.map((r) => r.rating)))
+          : Math.min(5.0, Math.max(1.0, !isNaN(dbRep) ? dbRep : 4.0));
+
         return response.status(200).json({
           id: u.id,
           userId: u.id,
@@ -2294,7 +2646,11 @@ application.get("/api/users/:userId", async (request, response) => {
           work_experience: u.work_experience || [],
           social_profiles: u.social_profiles || {},
           avatar_url: u.avatar_url || null,
-          reputation_score: parseFloat(u.reputation_score) || 5.0,
+          reputation_score: effectiveRep,
+          reputationScore: effectiveRep,
+          review_count: reviews.length,
+          reviewCount: reviews.length,
+          reviews,
           skills: u.skills || [],
         });
       }
@@ -2323,6 +2679,9 @@ application.get("/api/users/:userId", async (request, response) => {
       social_profiles: {},
       avatar_url: null,
       reputation_score: found.reputationScore,
+      reputationScore: found.reputationScore,
+      review_count: 0,
+      reviews: [],
       skills: skillsFormatted,
     });
   } catch (error) {
@@ -2363,10 +2722,24 @@ application.get("/api/users/:userId/history", async (request, response) => {
     const dbResult = await query(
       `SELECT sb.id, sb.mentor_id, sb.learner_id, sb.scheduled_at, sb.status, sb.topic, sb.notes,
               sb.declined_reason, sb.conversation_id,
-              json_build_object('id', m.id, 'name', m.name, 'role', m.role, 'avatar_url', m.avatar_url, 'is_demo', m.is_demo) as mentor,
-              json_build_object('id', l.id, 'name', l.name, 'role', l.role, 'avatar_url', l.avatar_url, 'is_demo', l.is_demo) as learner,
+              json_build_object(
+                'id', m.id,
+                'name', m.name,
+                'role', m.role,
+                'avatar_url', m.avatar_url,
+                'is_demo', m.is_demo,
+                'reputation_score', m.reputation_score,
+                'review_count', (SELECT COUNT(*)::int FROM reviews mr WHERE mr.mentor_id = m.id)
+              ) as mentor,
+              json_build_object(
+                'id', l.id,
+                'name', l.name,
+                'role', l.role,
+                'avatar_url', l.avatar_url,
+                'is_demo', l.is_demo
+              ) as learner,
               CASE WHEN r.id IS NOT NULL THEN
-                json_build_object('id', r.id, 'rating', r.rating, 'comment', r.comment)
+                json_build_object('id', r.id, 'rating', r.rating, 'comment', r.comment, 'created_at', r.created_at)
               ELSE NULL END as review
        FROM session_bookings sb
        JOIN users m ON sb.mentor_id = m.id
@@ -2410,7 +2783,7 @@ application.post("/api/reviews", authenticateToken, async (request, response) =>
     const userId = request.user.userId;
     const sessionId = request.body.sessionId || request.body.session_id;
     const rating = request.body.rating;
-    const comment = request.body.comment || request.body.review_text;
+    const rawComment = request.body.comment !== undefined ? request.body.comment : request.body.review_text;
 
     if (!sessionId || rating === undefined || rating === null) {
       return response.status(400).json({
@@ -2418,10 +2791,17 @@ application.post("/api/reviews", authenticateToken, async (request, response) =>
       });
     }
 
-    const numRating = parseInt(rating, 10);
-    if (isNaN(numRating) || numRating < 1 || numRating > 5) {
+    const numRating = Number(rating);
+    if (!Number.isInteger(numRating) || numRating < 1 || numRating > 5) {
       return response.status(400).json({
         error: "Rating must be an integer between 1 and 5.",
+      });
+    }
+
+    const cleanComment = typeof rawComment === "string" ? rawComment.trim() : "";
+    if (cleanComment.length > 1000) {
+      return response.status(400).json({
+        error: "Written feedback must not exceed 1000 characters.",
       });
     }
 
@@ -2469,20 +2849,39 @@ application.post("/api/reviews", authenticateToken, async (request, response) =>
     const reviewId = `rev_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
 
     // Insert review into PostgreSQL
-    await query(
-      `INSERT INTO reviews (id, session_id, reviewer_id, mentor_id, rating, comment, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)`,
-      [reviewId, sessionId, userId, sess.mentor_id, numRating, comment || ""]
-    );
+    let createdAt = new Date().toISOString();
+    try {
+      const insertRes = await query(
+        `INSERT INTO reviews (id, session_id, reviewer_id, mentor_id, rating, comment, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+         RETURNING created_at`,
+        [reviewId, sessionId, userId, sess.mentor_id, numRating, cleanComment]
+      );
+      if (insertRes.rows[0] && insertRes.rows[0].created_at) {
+        createdAt = insertRes.rows[0].created_at;
+      }
+    } catch (insertErr) {
+      if (insertErr && insertErr.code === "23505") {
+        return response.status(409).json({
+          error: "A review has already been submitted for this session. Duplicate reviews are not permitted.",
+        });
+      }
+      throw insertErr;
+    }
 
-    // Update teacher reputation using bounded Bayesian prior via ReputationEngine
+    // Update teacher reputation using bounded Bayesian prior via ReputationEngine (HashTable + PostgreSQL)
     const updatedReputation = await reputationEngine.updateTeacherReputationFromDatabase(
       sess.mentor_id,
       query
     );
 
+    // Reconcile teacher skillHashTable and mentorGraph state with updated PostgreSQL reputation
+    await reconcileTeacherDsaState(sess.mentor_id);
+
     // Update relationship edge weight in the Adjacency Graph (DSA Feature)
     mentorGraph.updateEdgeWeight(sess.learner_id, sess.mentor_id, numRating, true);
+
+    const reputationSummary = reputationEngine.getTeacherReputation(sess.mentor_id);
 
     // Notify mentor in-app
     await query(
@@ -2492,7 +2891,7 @@ application.post("/api/reviews", authenticateToken, async (request, response) =>
         sess.mentor_id,
         "review_received",
         "New Session Review Received",
-        `A learner submitted a ${numRating}-star review for your session.`,
+        `A learner submitted a ${numRating}-star review for "${sess.topic || "your session"}". Your reputation score is now ${Number(updatedReputation).toFixed(2)}.`,
         "/history?view=teaching",
       ]
     ).catch(() => {});
@@ -2503,10 +2902,15 @@ application.post("/api/reviews", authenticateToken, async (request, response) =>
       review: {
         id: reviewId,
         sessionId,
+        session_id: sessionId,
+        reviewer_id: userId,
+        mentor_id: sess.mentor_id,
         rating: numRating,
-        comment: comment || "",
+        comment: cleanComment,
+        created_at: createdAt,
       },
       updatedReputation,
+      reputationSummary,
     });
   } catch (error) {
     console.error("Error submitting review:", error);
@@ -2581,6 +2985,7 @@ application.get("/api/recommendations/:userId", async (request, response) => {
       // Exclude the learner themselves ($1), and exclude generic learners or profiles with no matching teachable skills
       const dbResult = await query(
         `SELECT u.id, u.name, u.role, u.bio, u.reputation_score, u.avatar_url, u.is_demo,
+                (SELECT COUNT(*)::int FROM reviews r WHERE r.mentor_id = u.id) as review_count,
                 COALESCE(array_agg(DISTINCT s.skill_name) FILTER (WHERE s.type = 'teach' AND s.skill_name IS NOT NULL), '{}') as skills,
                 COALESCE(
                   json_agg(
@@ -2627,10 +3032,18 @@ application.get("/api/recommendations/:userId", async (request, response) => {
       const mentorId = mentor.id || mentor.userId;
       const skillsList = Array.isArray(mentor.skills) ? mentor.skills : (mentor.skills ? [mentor.skills] : []);
 
+      // Reconcile reputation from ReputationEngine HashTable and PostgreSQL
+      const repSummary = reputationEngine.getTeacherReputation(mentorId);
+      const dbRep = parseFloat(mentor.reputation_score || mentor.reputationScore);
+      const effectiveReputation = repSummary.reviewCount > 0
+        ? repSummary.boundedReputation
+        : Math.min(5.0, Math.max(1.0, !isNaN(dbRep) ? dbRep : 4.0));
+      const reviewCount = parseInt(mentor.review_count, 10) || repSummary.reviewCount || 0;
+
       // Calculate graph network distance (hops) using BFS
       const networkDistance = mentorGraph.getDegreesOfSeparation(targetUserId, mentorId);
 
-      // Compute composite recommendation score
+      // Compute composite recommendation score (strictly capped at 100)
       const scoreResult = MaxHeap.computeRecommendationScore(
         {
           id: mentorId,
@@ -2638,13 +3051,13 @@ application.get("/api/recommendations/:userId", async (request, response) => {
           skills: mentor.skill_entries && Array.isArray(mentor.skill_entries) && mentor.skill_entries.length > 0
             ? mentor.skill_entries
             : skillsList,
-          reputation_score: mentor.reputation_score || mentor.reputationScore,
+          reputation_score: effectiveReputation,
         },
         learnerDesiredSkills,
         networkDistance
       );
 
-      const clampedScore = Math.min(100, Math.max(0, Math.round(scoreResult.score || 85)));
+      const clampedScore = Math.min(100, Math.max(0, Math.round(scoreResult.score || 0)));
 
       const candidateRecord = {
         mentor: {
@@ -2656,7 +3069,10 @@ application.get("/api/recommendations/:userId", async (request, response) => {
           avatar_url: mentor.avatar_url || null,
           is_demo: Boolean(mentor.is_demo),
           skills: mentor.skill_entries && mentor.skill_entries.length > 0 ? mentor.skill_entries : skillsList,
-          reputationScore: parseFloat(mentor.reputation_score || mentor.reputationScore) || 5.0,
+          reputationScore: effectiveReputation,
+          reputation_score: effectiveReputation,
+          review_count: reviewCount,
+          reviewCount: reviewCount,
         },
         score: clampedScore,
         reason: scoreResult.reason,
@@ -4729,6 +5145,9 @@ application.post(
 
         // Ensure user can_teach is true
         await query("UPDATE users SET can_teach = TRUE WHERE id = $1", [app.user_id]);
+
+        // Reconcile teacher skillHashTable and mentorGraph state with newly verified skill
+        await reconcileTeacherDsaState(app.user_id);
 
         // Notify applicant in-app
         await query(
