@@ -323,7 +323,7 @@ export function LearningHistory() {
                       Decline...
                     </button>
                     <Link
-                      to="/messages"
+                      to={session.conversation_id ? `/messages?conversationId=${session.conversation_id}` : `/messages?userId=${encodeURIComponent(partner.id)}`}
                       className="btn btn-outline btn-sm"
                       style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}
                     >
@@ -333,7 +333,21 @@ export function LearningHistory() {
                   </div>
                 )}
 
-                {/* Mark Completed (for Accepted sessions) */}
+                {/* Learner Pending Coordination */}
+                {isLearner && isPending && (
+                  <div style={{ display: 'flex', gap: '0.65rem', marginTop: '1rem', flexWrap: 'wrap' }}>
+                    <Link
+                      to={session.conversation_id ? `/messages?conversationId=${session.conversation_id}` : `/messages?userId=${encodeURIComponent(partner.id)}`}
+                      className="btn btn-outline btn-sm"
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}
+                    >
+                      <MessageIcon size={16} />
+                      Coordinate in Chat
+                    </Link>
+                  </div>
+                )}
+
+                {/* Mark Completed & Live Session Actions (for Accepted sessions) */}
                 {isAccepted && (
                   <div style={{ display: 'flex', gap: '0.65rem', marginTop: '1rem', flexWrap: 'wrap' }}>
                     <button
@@ -344,12 +358,19 @@ export function LearningHistory() {
                       Mark Session Completed
                     </button>
                     <Link
-                      to="/messages"
+                      to={session.conversation_id ? `/messages?conversationId=${session.conversation_id}` : `/messages?userId=${encodeURIComponent(partner.id)}`}
                       className="btn btn-secondary btn-sm"
                       style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}
                     >
                       <MessageIcon size={16} />
                       Chat with {partner.name}
+                    </Link>
+                    <Link
+                      to={session.conversation_id ? `/messages?conversationId=${session.conversation_id}&startCall=video` : `/messages?userId=${encodeURIComponent(partner.id)}&startCall=video`}
+                      className="btn btn-primary btn-sm"
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}
+                    >
+                      📹 Start / Join Session Call
                     </Link>
                   </div>
                 )}

@@ -81,6 +81,23 @@ The backend connects directly to a standard local PostgreSQL database instance f
 4. **Health Check Endpoint**:
    - Verify connection status at `GET /api/health/db`.
 
+## Messaging, Private Attachments, Voice Notes & Live WebRTC Calls
+
+- **Private Attachments & Voice Notes**:
+  - Uploaded files (`POST /api/conversations/:id/attachments`) are validated on the server using magic-byte signatures (`backend/utils/fileValidation.js`), MIME/extension category checks, and size limits (15 MB for PDF/DOCX/XLSX/PNG/JPG/WebP/GIF attachments; 10 MB / 5 minutes for voice notes).
+  - Files are stored privately under `backend/uploads/attachments/` (never exposed via `express.static`) and served exclusively through `GET /api/conversations/:convId/attachments/:messageId` after verifying that the authenticated caller is one of the two conversation participants (`403 Forbidden` for any non-participant).
+  - The attachment streaming route supports HTTP Range requests (`206 Partial Content`, `Accept-Ranges: bytes`, `Content-Length`) for HTML5 `<audio>` duration display and seeking.
+- **WebRTC Audio/Video Calls & TURN Configuration (`GET /api/calls/ice-servers`)**:
+  - Calls work out-of-the-box on `localhost` and standard NATs using default STUN servers (`stun:stun.l.google.com:19302`).
+  - Outside `localhost`, browsers require **HTTPS** for `navigator.mediaDevices.getUserMedia` and `getDisplayMedia`.
+  - For connections across symmetric NATs or restrictive corporate/campus firewalls, configure a self-hosted TURN relay (such as `coturn`) in `backend/.env` without hardcoding credentials in source code:
+    ```env
+    STUN_SERVER_URL=stun:stun.l.google.com:19302
+    TURN_SERVER_URL=turn:your-turn-host.example.com:3478
+    TURN_USERNAME=your_turn_username
+    TURN_CREDENTIAL=your_turn_credential
+    ```
+
 ## System Architecture Reference
 
 For detailed sequence diagrams, database entity relationships, and the complete REST API specification, see [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md).

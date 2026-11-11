@@ -105,10 +105,10 @@ const attachmentStorage = multer.diskStorage({
     cb(null, attachmentsDir);
   },
   filename: function (req, file, cb) {
-    const rawExt = path.extname(file.originalname).toLowerCase();
+    const rawExt = path.extname(file.originalname || "").toLowerCase();
     const safeExt = [
-      ".pdf", ".docx", ".xlsx", ".png", ".jpg", ".jpeg", ".webp",
-      ".webm", ".ogg", ".wav", ".mp3", ".m4a"
+      ".pdf", ".docx", ".xlsx", ".png", ".jpg", ".jpeg", ".webp", ".gif",
+      ".webm", ".ogg", ".wav", ".mp3", ".m4a", ".mp4"
     ].includes(rawExt) ? rawExt : ".bin";
     const userPart = req.user ? req.user.userId : "anon";
     const filename = `attach_${userPart}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}${safeExt}`;
@@ -118,25 +118,32 @@ const attachmentStorage = multer.diskStorage({
 
 const attachmentUpload = multer({
   storage: attachmentStorage,
-  limits: { fileSize: 15 * 1024 * 1024 }, // 15 MB maximum
+  limits: { fileSize: 15 * 1024 * 1024 }, // 15 MB maximum (voice notes further capped at 10 MB)
   fileFilter: function (req, file, cb) {
-    const rawExt = path.extname(file.originalname).toLowerCase();
+    const rawExt = path.extname(file.originalname || "").toLowerCase();
     const mime = (file.mimetype || "").toLowerCase();
+    // Explicitly disallow SVG to prevent stored XSS via inline SVG attachments
+    if (rawExt === ".svg" || mime.includes("svg")) {
+      return cb(new Error("SVG files are not permitted for security reasons. Please upload PNG, JPG, WebP, or GIF images."));
+    }
     const allowedExts = [
-      ".pdf", ".docx", ".xlsx", ".png", ".jpg", ".jpeg", ".webp",
-      ".webm", ".ogg", ".wav", ".mp3", ".m4a"
+      ".pdf", ".docx", ".xlsx", ".png", ".jpg", ".jpeg", ".webp", ".gif",
+      ".webm", ".ogg", ".wav", ".mp3", ".m4a", ".mp4"
     ];
     if (
       allowedExts.includes(rawExt) ||
       mime.startsWith("image/") ||
       mime.startsWith("audio/") ||
+      mime === "video/webm" ||
+      mime === "video/mp4" ||
       mime.includes("pdf") ||
       mime.includes("officedocument") ||
-      mime.includes("msword")
+      mime.includes("msword") ||
+      mime.includes("ms-excel")
     ) {
       return cb(null, true);
     }
-    return cb(new Error("File format not supported. Permitted types: PDF, DOCX, XLSX, images, and audio voice recordings."));
+    return cb(new Error("File format not supported. Permitted types: PDF, DOCX, XLSX, images (PNG/JPG/WebP/GIF), and audio voice recordings."));
   },
 });
 
@@ -259,8 +266,9 @@ async function authenticateToken(request, response, next) {
     if (match) {
       token = match[1].trim();
     }
-  } else if (request.query && request.query.token) {
-    token = request.query.token;
+  }
+  if (!token && request.query && typeof request.query.token === "string") {
+    token = request.query.token.trim();
   }
 
   if (!token) {
@@ -3301,8 +3309,11 @@ application.get("/api/conversations", authenticateToken, async (request, respons
     }
 
     const convRes = await query(
-      `SELECT c.id, c.user1_id, c.user2_id, c.session_id, c.is_closed, c.closed_at, c.last_message_at, c.created_at,
-              sb.status as session_status, sb.topic as session_skill,
+      `SELECT c.id, c.user1_id, c.user2_id,
+              COALESCE(c.session_id, fallback_sb.id) as session_id,
+              c.is_closed, c.closed_at, c.last_message_at, c.created_at,
+              COALESCE(sb.status, fallback_sb.status) as session_status,
+              COALESCE(sb.topic, fallback_sb.topic) as session_skill,
               json_build_object(
                 'id', peer.id,
                 'name', peer.name,
@@ -3329,6 +3340,21 @@ application.get("/api/conversations", authenticateToken, async (request, respons
        FROM conversations c
        JOIN users peer ON (CASE WHEN c.user1_id = $1 THEN c.user2_id ELSE c.user1_id END) = peer.id
        LEFT JOIN session_bookings sb ON c.session_id = sb.id
+       LEFT JOIN LATERAL (
+         SELECT s.id, s.status, s.topic
+         FROM session_bookings s
+         WHERE (s.learner_id = c.user1_id AND s.mentor_id = c.user2_id)
+            OR (s.learner_id = c.user2_id AND s.mentor_id = c.user1_id)
+         ORDER BY
+           CASE
+             WHEN s.status IN ('accepted', 'confirmed') THEN 1
+             WHEN s.status IN ('pending', 'queued') THEN 2
+             WHEN s.status = 'completed' THEN 3
+             ELSE 4
+           END ASC,
+           s.created_at DESC
+         LIMIT 1
+       ) fallback_sb ON TRUE
        WHERE c.user1_id = $1 OR c.user2_id = $1
        ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC`,
       [userId]
@@ -3377,9 +3403,27 @@ application.post("/api/conversations", authenticateToken, async (request, respon
     const u1 = currentUserId < recipientId ? currentUserId : recipientId;
     const u2 = currentUserId < recipientId ? recipientId : currentUserId;
 
+    // Find the most relevant session between the two users if one exists
+    const sessRes = await query(
+      `SELECT id, status, topic
+       FROM session_bookings
+       WHERE (learner_id = $1 AND mentor_id = $2) OR (learner_id = $2 AND mentor_id = $1)
+       ORDER BY
+         CASE
+           WHEN status IN ('accepted', 'confirmed') THEN 1
+           WHEN status IN ('pending', 'queued') THEN 2
+           WHEN status = 'completed' THEN 3
+           ELSE 4
+         END ASC,
+         created_at DESC
+       LIMIT 1`,
+      [u1, u2]
+    );
+    const bestSession = sessRes.rows[0] || null;
+
     // Check existing or insert
     let convRes = await query(
-      `SELECT id, user1_id, user2_id, last_message_at, created_at
+      `SELECT id, user1_id, user2_id, session_id, is_closed, closed_at, last_message_at, created_at
        FROM conversations
        WHERE (user1_id = $1 AND user2_id = $2) OR (user1_id = $2 AND user2_id = $1)`,
       [u1, u2]
@@ -3387,10 +3431,10 @@ application.post("/api/conversations", authenticateToken, async (request, respon
 
     if (convRes.rows.length === 0) {
       convRes = await query(
-        `INSERT INTO conversations (user1_id, user2_id, last_message_at)
-         VALUES ($1, $2, CURRENT_TIMESTAMP)
-         RETURNING id, user1_id, user2_id, last_message_at, created_at`,
-        [u1, u2]
+        `INSERT INTO conversations (user1_id, user2_id, session_id, is_closed, last_message_at)
+         VALUES ($1, $2, $3, FALSE, CURRENT_TIMESTAMP)
+         RETURNING id, user1_id, user2_id, session_id, is_closed, closed_at, last_message_at, created_at`,
+        [u1, u2, bestSession ? bestSession.id : null]
       );
 
       // Record mutual connection
@@ -3400,14 +3444,43 @@ application.post("/api/conversations", authenticateToken, async (request, respon
          ON CONFLICT (user_id, peer_id) DO NOTHING`,
         [currentUserId, recipientId]
       );
+    } else if (bestSession && (!convRes.rows[0].session_id || ["accepted", "confirmed"].includes(bestSession.status))) {
+      // Ensure conversation points to active session if one exists
+      const shouldReopen = ["accepted", "confirmed", "pending", "queued"].includes(bestSession.status);
+      convRes = await query(
+        `UPDATE conversations
+         SET session_id = COALESCE(session_id, $1),
+             is_closed = CASE WHEN $2::boolean THEN FALSE ELSE is_closed END
+         WHERE id = $3
+         RETURNING id, user1_id, user2_id, session_id, is_closed, closed_at, last_message_at, created_at`,
+        [bestSession.id, shouldReopen, convRes.rows[0].id]
+      );
     }
 
     const conv = convRes.rows[0];
+    let sessionStatus = bestSession ? bestSession.status : null;
+    let sessionSkill = bestSession ? bestSession.topic : null;
+    if (conv.session_id && (!bestSession || bestSession.id !== conv.session_id)) {
+      const linkedRes = await query(
+        `SELECT status, topic FROM session_bookings WHERE id = $1`,
+        [conv.session_id]
+      );
+      if (linkedRes.rows[0]) {
+        sessionStatus = linkedRes.rows[0].status;
+        sessionSkill = linkedRes.rows[0].topic;
+      }
+    }
+
     return response.status(200).json({
       conversation: {
         id: conv.id,
         user1_id: conv.user1_id,
         user2_id: conv.user2_id,
+        session_id: conv.session_id || (bestSession ? bestSession.id : null),
+        session_status: sessionStatus,
+        session_skill: sessionSkill,
+        is_closed: Boolean(conv.is_closed),
+        closed_at: conv.closed_at || null,
         last_message_at: conv.last_message_at,
         created_at: conv.created_at,
         peer,
@@ -3533,9 +3606,11 @@ application.post("/api/conversations/:id/messages", authenticateToken, async (re
 
     // Insert message
     const msgRes = await query(
-      `INSERT INTO messages (conversation_id, sender_id, content, is_read, created_at)
-       VALUES ($1, $2, $3, FALSE, CURRENT_TIMESTAMP)
-       RETURNING id, conversation_id, sender_id, content, is_read, created_at`,
+      `INSERT INTO messages (conversation_id, sender_id, content, is_read, created_at, message_type)
+       VALUES ($1, $2, $3, FALSE, CURRENT_TIMESTAMP, 'text')
+       RETURNING id, conversation_id, sender_id, content, is_read, created_at, message_type,
+                 attachment_filename, attachment_original_name, attachment_mimetype,
+                 attachment_size, duration_seconds, call_action`,
       [convId, userId, content.trim()]
     );
     const newMessage = msgRes.rows[0];
@@ -3547,8 +3622,9 @@ application.post("/api/conversations/:id/messages", authenticateToken, async (re
     );
 
     // Fetch sender info for notification
-    const senderRes = await query(`SELECT name FROM users WHERE id = $1`, [userId]);
+    const senderRes = await query(`SELECT name, avatar_url FROM users WHERE id = $1`, [userId]);
     const senderName = senderRes.rows[0]?.name || "A community member";
+    const senderAvatar = senderRes.rows[0]?.avatar_url || null;
 
     // Create in-app notification for recipient
     await query(
@@ -3582,6 +3658,7 @@ application.post("/api/conversations/:id/messages", authenticateToken, async (re
       data: {
         ...newMessage,
         sender_name: senderName,
+        sender_avatar: senderAvatar,
       },
     });
   } catch (error) {
@@ -4810,6 +4887,11 @@ application.post(
   (request, response, next) => {
     attachmentUpload.single("file")(request, response, (err) => {
       if (err instanceof multer.MulterError) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          return response.status(400).json({
+            error: "Attachment exceeds the maximum allowed size (15 MB for documents/images, 10 MB for voice notes).",
+          });
+        }
         return response.status(400).json({ error: `Upload limit error: ${err.message}` });
       } else if (err) {
         return response.status(400).json({ error: err.message });
@@ -4822,7 +4904,10 @@ application.post(
       const userId = request.user.userId;
       const convId = parseInt(request.params.id, 10);
       const file = request.file;
-      const durationSeconds = request.body.durationSeconds ? parseInt(request.body.durationSeconds, 10) : null;
+      const rawDuration = request.body.durationSeconds !== undefined ? Number(request.body.durationSeconds) : null;
+      const durationSeconds = rawDuration !== null && !Number.isNaN(rawDuration) && rawDuration >= 0
+        ? Math.min(Math.round(rawDuration), 300)
+        : null;
 
       if (isNaN(convId)) {
         if (file) try { fs.unlinkSync(file.path); } catch (e) {}
@@ -4833,16 +4918,12 @@ application.post(
         return response.status(400).json({ error: "No attachment file uploaded." });
       }
 
-      // Validate file signature / magic bytes
-      const sigValidation = validateFileSignature(file.path, file.mimetype);
-      if (!sigValidation.valid) {
+      if (!file.size || file.size <= 0) {
         try { fs.unlinkSync(file.path); } catch (e) {}
-        return response.status(400).json({
-          error: `File validation failed: ${sigValidation.reason}`,
-        });
+        return response.status(400).json({ error: "Uploaded file is empty (0 bytes)." });
       }
 
-      // Check participant authorization
+      // Check participant authorization first before further processing
       const convRes = await query(
         "SELECT id, user1_id, user2_id, is_closed FROM conversations WHERE id = $1",
         [convId]
@@ -4863,9 +4944,35 @@ application.post(
         return response.status(400).json({ error: "This conversation is closed." });
       }
 
-      const isVoice = file.mimetype.startsWith("audio/") || path.extname(file.originalname).match(/\.(webm|ogg|wav|mp3|m4a)$/i);
+      // Validate file signature / magic bytes and declared MIME/extension match
+      const sigValidation = validateFileSignature(file.path, file.mimetype, file.originalname);
+      if (!sigValidation.valid) {
+        try { fs.unlinkSync(file.path); } catch (e) {}
+        return response.status(400).json({
+          error: `File validation failed: ${sigValidation.reason}`,
+        });
+      }
+
+      const isVoice =
+        sigValidation.detectedCategory === "audio" ||
+        (file.mimetype || "").toLowerCase().startsWith("audio/") ||
+        Boolean(path.extname(file.originalname || "").match(/\.(webm|ogg|wav|mp3|m4a)$/i));
+
+      // Enforce 10 MB limit specifically on audio voice recordings
+      const MAX_VOICE_BYTES = 10 * 1024 * 1024;
+      if (isVoice && file.size > MAX_VOICE_BYTES) {
+        try { fs.unlinkSync(file.path); } catch (e) {}
+        return response.status(400).json({
+          error: "Voice note exceeds the 10 MB size limit. Please record a shorter voice note.",
+        });
+      }
+
       const messageType = isVoice ? "voice" : "attachment";
-      const content = isVoice ? "Audio Voice Note" : (file.originalname || "File Attachment");
+      const sanitizedOriginalName = path.basename(file.originalname || (isVoice ? "voice_note.webm" : "attachment"));
+      const content = isVoice ? "Audio Voice Note" : sanitizedOriginalName;
+      const normalizedMime = isVoice && (file.mimetype === "video/webm" || !file.mimetype)
+        ? "audio/webm"
+        : (file.mimetype || "application/octet-stream");
 
       const insertRes = await query(
         `INSERT INTO messages (
@@ -4880,8 +4987,8 @@ application.post(
           content,
           messageType,
           file.filename,
-          file.originalname,
-          file.mimetype,
+          sanitizedOriginalName,
+          normalizedMime,
           file.size,
           durationSeconds,
         ]
@@ -4889,8 +4996,28 @@ application.post(
 
       await query("UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP WHERE id = $1", [convId]);
 
+      const senderRes = await query(`SELECT name, avatar_url FROM users WHERE id = $1`, [userId]);
+      const senderName = senderRes.rows[0]?.name || "A community member";
+      const senderAvatar = senderRes.rows[0]?.avatar_url || null;
+      const recipientId = conv.user1_id === userId ? conv.user2_id : conv.user1_id;
+
+      await query(
+        `INSERT INTO notifications (user_id, type, title, message, link, is_read, created_at)
+         VALUES ($1, 'message', $2, $3, $4, FALSE, CURRENT_TIMESTAMP)`,
+        [
+          recipientId,
+          isVoice ? `New voice note from ${senderName}` : `New attachment from ${senderName}`,
+          isVoice ? `Sent a voice note${durationSeconds ? ` (${durationSeconds}s)` : ""}` : `Shared file: ${sanitizedOriginalName}`,
+          `/messages?conversationId=${convId}`,
+        ]
+      ).catch(() => {});
+
       return response.status(201).json({
-        message: insertRes.rows[0],
+        message: {
+          ...insertRes.rows[0],
+          sender_name: senderName,
+          sender_avatar: senderAvatar,
+        },
       });
     } catch (error) {
       console.error("Error saving attachment:", error);
@@ -4902,6 +5029,7 @@ application.post(
 /**
  * ENDPOINT: GET /api/conversations/:convId/attachments/:messageId
  * Securely stream or download attachment / voice note for conversation participants.
+ * Supports HTTP Range requests (206 Partial Content) for reliable HTML5 audio playback and seeking.
  */
 application.get(
   "/api/conversations/:convId/attachments/:messageId",
@@ -4911,6 +5039,10 @@ application.get(
       const userId = request.user.userId;
       const convId = parseInt(request.params.convId, 10);
       const messageId = parseInt(request.params.messageId, 10);
+
+      if (isNaN(convId) || isNaN(messageId)) {
+        return response.status(400).json({ error: "Invalid conversation or message ID." });
+      }
 
       const convRes = await query("SELECT user1_id, user2_id FROM conversations WHERE id = $1", [convId]);
       if (convRes.rows.length === 0) {
@@ -4927,17 +5059,44 @@ application.get(
       }
 
       const msg = msgRes.rows[0];
-      const filePath = path.join(attachmentsDir, msg.attachment_filename);
+      const safeStoredFilename = path.basename(msg.attachment_filename);
+      const filePath = path.join(attachmentsDir, safeStoredFilename);
       if (!fs.existsSync(filePath)) {
         return response.status(404).json({ error: "Attachment file missing from storage." });
       }
 
-      response.setHeader("Content-Type", msg.attachment_mimetype || "application/octet-stream");
-      response.setHeader(
-        "Content-Disposition",
-        `inline; filename="${encodeURIComponent(msg.attachment_original_name || msg.attachment_filename)}"`
-      );
+      const stat = fs.statSync(filePath);
+      const fileSize = stat.size;
+      const contentType = msg.attachment_mimetype || "application/octet-stream";
+      const dispositionType = request.query.download === "1" || request.query.download === "true" ? "attachment" : "inline";
+      const safeDisplayName = encodeURIComponent(msg.attachment_original_name || safeStoredFilename);
 
+      response.setHeader("Content-Type", contentType);
+      response.setHeader("X-Content-Type-Options", "nosniff");
+      response.setHeader("Cache-Control", "private, max-age=3600");
+      response.setHeader("Accept-Ranges", "bytes");
+      response.setHeader("Content-Disposition", `${dispositionType}; filename="${safeDisplayName}"`);
+
+      const range = request.headers.range;
+      if (range) {
+        const parts = range.replace(/bytes=/, "").split("-");
+        const start = parseInt(parts[0], 10);
+        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+        if (isNaN(start) || isNaN(end) || start >= fileSize || end >= fileSize || start > end) {
+          response.setHeader("Content-Range", `bytes */${fileSize}`);
+          return response.status(416).end();
+        }
+
+        const chunksize = end - start + 1;
+        response.status(206);
+        response.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`);
+        response.setHeader("Content-Length", chunksize);
+        const partialStream = fs.createReadStream(filePath, { start, end });
+        return partialStream.pipe(response);
+      }
+
+      response.setHeader("Content-Length", fileSize);
       const fileStream = fs.createReadStream(filePath);
       return fileStream.pipe(response);
     } catch (error) {
@@ -4947,31 +5106,46 @@ application.get(
 );
 
 // ----------------------------------------------------------------------------
-// WEBRTC CALL SIGNALING ENDPOINTS (Accepted Sessions Only)
+// WEBRTC CALL SIGNALING ENDPOINTS (Accepted Sessions & Active Conversations)
 // ----------------------------------------------------------------------------
+
+// Monotonic sequence counter and active call state map per conversation
+let globalCallSignalSeq = 1;
+const activeCallStateMap = new Map();
+
+function getOrInitActiveCallState(convId) {
+  if (!activeCallStateMap.has(convId)) {
+    activeCallStateMap.set(convId, null);
+  }
+  return activeCallStateMap.get(convId);
+}
 
 /**
  * ENDPOINT: GET /api/calls/ice-servers
  * Provides configurable STUN/TURN server configuration with network requirements disclosure.
  */
 application.get("/api/calls/ice-servers", authenticateToken, (request, response) => {
+  const customStun = process.env.STUN_SERVER_URL ? process.env.STUN_SERVER_URL.trim() : null;
   const stunServers = [
+    ...(customStun ? [{ urls: customStun }] : []),
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
     { urls: "stun:stun2.l.google.com:19302" },
   ];
 
   const iceServers = [...stunServers];
-  const turnUrl = process.env.TURN_SERVER_URL;
-  const turnUsername = process.env.TURN_USERNAME;
-  const turnCredential = process.env.TURN_CREDENTIAL;
+  const turnUrl = process.env.TURN_SERVER_URL ? process.env.TURN_SERVER_URL.trim() : "";
+  const turnUsername = process.env.TURN_USERNAME ? process.env.TURN_USERNAME.trim() : "";
+  const turnCredential = process.env.TURN_CREDENTIAL ? process.env.TURN_CREDENTIAL.trim() : "";
 
   if (turnUrl) {
-    iceServers.push({
-      urls: turnUrl,
-      username: turnUsername,
-      credential: turnCredential,
-    });
+    const urls = turnUrl.includes(",")
+      ? turnUrl.split(",").map((u) => u.trim()).filter(Boolean)
+      : turnUrl;
+    const turnEntry = { urls };
+    if (turnUsername) turnEntry.username = turnUsername;
+    if (turnCredential) turnEntry.credential = turnCredential;
+    iceServers.push(turnEntry);
   }
 
   return response.status(200).json({
@@ -4982,9 +5156,45 @@ application.get("/api/calls/ice-servers", authenticateToken, (request, response)
 });
 
 /**
+ * Helper: Resolves a conversation and its session status for call authorization.
+ */
+async function resolveConversationForCall(convId) {
+  const convRes = await query(
+    `SELECT c.id, c.user1_id, c.user2_id, c.is_closed,
+            c.session_id as direct_session_id,
+            sb.status as direct_session_status,
+            COALESCE(c.session_id, fallback_sb.id) as session_id,
+            COALESCE(sb.status, fallback_sb.status) as session_status,
+            COALESCE(sb.topic, fallback_sb.topic) as session_skill
+     FROM conversations c
+     LEFT JOIN session_bookings sb ON c.session_id = sb.id
+     LEFT JOIN LATERAL (
+       SELECT s.id, s.status, s.topic
+       FROM session_bookings s
+       WHERE (s.learner_id = c.user1_id AND s.mentor_id = c.user2_id)
+          OR (s.learner_id = c.user2_id AND s.mentor_id = c.user1_id)
+       ORDER BY
+         CASE
+           WHEN s.status IN ('accepted', 'confirmed') THEN 1
+           WHEN s.status IN ('pending', 'queued') THEN 2
+           WHEN s.status = 'completed' THEN 3
+           ELSE 4
+         END ASC,
+         s.created_at DESC
+       LIMIT 1
+     ) fallback_sb ON TRUE
+     WHERE c.id = $1`,
+    [convId]
+  );
+  return convRes.rows[0] || null;
+}
+
+/**
  * ENDPOINT: POST /api/calls/signal
- * Sends a WebRTC signaling message (offer, answer, candidate, start, end, reaction).
- * Strictly authorizes that the conversation's linked session is accepted or confirmed.
+ * Sends a WebRTC signaling message (start, offer, accept, answer, candidate, connected,
+ * decline, missed, failed, end, media-state, chat_sync, reaction).
+ * Strictly authorizes that the caller is one of the two conversation participants and
+ * that any linked session is accepted/confirmed.
  */
 application.post("/api/calls/signal", authenticateToken, async (request, response) => {
   try {
@@ -4996,29 +5206,33 @@ application.post("/api/calls/signal", authenticateToken, async (request, respons
     }
 
     const convId = parseInt(conversationId, 10);
-    const convRes = await query(
-      `SELECT c.id, c.user1_id, c.user2_id, c.session_id, sb.status as session_status
-       FROM conversations c
-       LEFT JOIN session_bookings sb ON c.session_id = sb.id
-       WHERE c.id = $1`,
-      [convId]
-    );
+    if (isNaN(convId)) {
+      return response.status(400).json({ error: "Invalid conversationId." });
+    }
 
-    if (convRes.rows.length === 0) {
+    const conv = await resolveConversationForCall(convId);
+    if (!conv) {
       return response.status(404).json({ error: "Conversation not found." });
     }
 
-    const conv = convRes.rows[0];
     if (conv.user1_id !== userId && conv.user2_id !== userId) {
       return response.status(403).json({ error: "Unauthorized: You are not in this conversation." });
     }
 
-    // Call permissions: Only allowed for accepted or confirmed sessions
-    if (conv.session_status && !["accepted", "confirmed"].includes(conv.session_status)) {
+    if (conv.is_closed) {
+      return response.status(400).json({ error: "Cannot place or signal a call in a closed conversation." });
+    }
+
+    // Call permissions: If the conversation is directly linked to a session whose status is not accepted/confirmed,
+    // or has a fallback session that is not accepted/confirmed, block with 400.
+    const effectiveSessionStatus = conv.direct_session_id ? conv.direct_session_status : conv.session_status;
+    if (effectiveSessionStatus && !["accepted", "confirmed"].includes(effectiveSessionStatus)) {
       return response.status(400).json({
-        error: `WebRTC calls are only enabled for accepted sessions (current session status: "${conv.session_status}").`,
+        error: `WebRTC calls are only enabled for accepted sessions (current session status: "${effectiveSessionStatus}").`,
       });
     }
+
+    const peerId = conv.user1_id === userId ? conv.user2_id : conv.user1_id;
 
     // Push signal to in-memory call signaling queue for this conversation
     if (!callSignalingMap.has(convId)) {
@@ -5026,42 +5240,210 @@ application.post("/api/calls/signal", authenticateToken, async (request, respons
     }
     const queue = callSignalingMap.get(convId);
 
+    const now = Date.now();
+    const seq = globalCallSignalSeq++;
     const signalObj = {
-      id: `sig_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      id: `sig_${now}_${seq}_${Math.random().toString(36).substring(2, 6)}`,
+      seq,
       from: userId,
       type,
-      payload,
-      timestamp: Date.now(),
+      payload: payload || {},
+      timestamp: now,
     };
     queue.push(signalObj);
 
-    // Keep queue trimmed to last 40 signals
-    if (queue.length > 40) {
-      queue.splice(0, queue.length - 40);
+    // Keep queue trimmed to last 200 signals so rapid ICE candidates never evict offer/answer
+    if (queue.length > 200) {
+      queue.splice(0, queue.length - 200);
     }
 
-    // If call started or ended, record event in session conversation messages
+    // Maintain structured activeCall state per conversation for late-join/switch recovery
+    let activeCall = getOrInitActiveCallState(convId);
+    const senderRes = await query(`SELECT name FROM users WHERE id = $1`, [userId]).catch(() => ({ rows: [] }));
+    const senderName = senderRes.rows[0]?.name || (payload && payload.callerName) || "Participant";
+
     if (type === "start") {
-      const mode = payload && payload.mode === "audio" ? "Audio Call" : "Video Call";
+      const callMode = payload && payload.mode === "audio" ? "audio" : "video";
+      const callId = (payload && payload.callId) || `call_${convId}_${now}`;
+      activeCall = {
+        callId,
+        conversationId: convId,
+        callerId: userId,
+        callerName: senderName,
+        calleeId: peerId,
+        mode: callMode,
+        status: "ringing",
+        startedAt: now,
+        connectedAt: null,
+        updatedAt: now,
+        offer: null,
+        answer: null,
+        candidates: [],
+        mediaState: {
+          [userId]: {
+            micMuted: false,
+            cameraOff: callMode === "audio",
+            screenSharing: false,
+          },
+        },
+        terminalLogged: false,
+      };
+      activeCallStateMap.set(convId, activeCall);
+
+      const modeLabel = callMode === "audio" ? "Audio Call" : "Video Call";
       await query(
         `INSERT INTO messages (
            conversation_id, sender_id, content, is_read, created_at,
            message_type, call_action
          ) VALUES ($1, $2, $3, FALSE, CURRENT_TIMESTAMP, 'call_log', 'started')`,
-        [convId, userId, `${mode} started`]
+        [convId, userId, `${modeLabel} started`]
       ).catch(() => {});
+      await query(`UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP WHERE id = $1`, [convId]).catch(() => {});
+    } else if (type === "offer") {
+      if (!activeCall || ["ended", "declined", "missed", "failed"].includes(activeCall.status)) {
+        const callMode = payload && payload.mode === "audio" ? "audio" : "video";
+        activeCall = {
+          callId: (payload && payload.callId) || `call_${convId}_${now}`,
+          conversationId: convId,
+          callerId: userId,
+          callerName: senderName,
+          calleeId: peerId,
+          mode: callMode,
+          status: "ringing",
+          startedAt: now,
+          connectedAt: null,
+          updatedAt: now,
+          offer: payload.sdp || payload,
+          answer: null,
+          candidates: [],
+          mediaState: {},
+          terminalLogged: false,
+        };
+      } else {
+        activeCall.offer = payload.sdp || payload;
+        activeCall.updatedAt = now;
+      }
+      activeCallStateMap.set(convId, activeCall);
+    } else if (type === "accept") {
+      if (activeCall) {
+        activeCall.status = "connecting";
+        activeCall.updatedAt = now;
+      }
+    } else if (type === "answer") {
+      if (activeCall) {
+        activeCall.answer = payload.sdp || payload;
+        activeCall.status = "connecting";
+        activeCall.updatedAt = now;
+      }
+    } else if (type === "connected") {
+      if (activeCall) {
+        activeCall.status = "connected";
+        if (!activeCall.connectedAt) activeCall.connectedAt = now;
+        activeCall.updatedAt = now;
+      }
+    } else if (type === "candidate") {
+      if (activeCall && payload && payload.candidate) {
+        activeCall.candidates.push({
+          from: userId,
+          candidate: payload.candidate,
+          timestamp: now,
+          seq,
+        });
+        if (activeCall.candidates.length > 120) {
+          activeCall.candidates.splice(0, activeCall.candidates.length - 120);
+        }
+        activeCall.updatedAt = now;
+      }
+    } else if (type === "media-state") {
+      if (activeCall) {
+        activeCall.mediaState = activeCall.mediaState || {};
+        activeCall.mediaState[userId] = {
+          ...(activeCall.mediaState[userId] || {}),
+          ...(payload || {}),
+        };
+        activeCall.updatedAt = now;
+      }
+    } else if (type === "decline" || (type === "end" && payload && payload.reason === "declined")) {
+      const modeLabel = (activeCall && activeCall.mode === "audio") || (payload && payload.mode === "audio")
+        ? "Audio Call"
+        : "Video Call";
+      if (!activeCall || !activeCall.terminalLogged) {
+        if (activeCall) {
+          activeCall.status = "declined";
+          activeCall.updatedAt = now;
+          activeCall.terminalLogged = true;
+        }
+        await query(
+          `INSERT INTO messages (
+             conversation_id, sender_id, content, is_read, created_at,
+             message_type, call_action, duration_seconds
+           ) VALUES ($1, $2, $3, FALSE, CURRENT_TIMESTAMP, 'call_log', 'declined', 0)`,
+          [convId, userId, `${modeLabel} declined`]
+        ).catch(() => {});
+        await query(`UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP WHERE id = $1`, [convId]).catch(() => {});
+      }
+    } else if (type === "missed" || (type === "end" && payload && payload.reason === "missed")) {
+      const modeLabel = (activeCall && activeCall.mode === "audio") || (payload && payload.mode === "audio")
+        ? "Audio Call"
+        : "Video Call";
+      if (!activeCall || !activeCall.terminalLogged) {
+        if (activeCall) {
+          activeCall.status = "missed";
+          activeCall.updatedAt = now;
+          activeCall.terminalLogged = true;
+        }
+        await query(
+          `INSERT INTO messages (
+             conversation_id, sender_id, content, is_read, created_at,
+             message_type, call_action, duration_seconds
+           ) VALUES ($1, $2, $3, FALSE, CURRENT_TIMESTAMP, 'call_log', 'missed', 0)`,
+          [convId, userId, `Missed ${modeLabel.toLowerCase()}`]
+        ).catch(() => {});
+        await query(`UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP WHERE id = $1`, [convId]).catch(() => {});
+      }
+    } else if (type === "failed" || (type === "end" && payload && payload.reason === "failed")) {
+      const modeLabel = (activeCall && activeCall.mode === "audio") || (payload && payload.mode === "audio")
+        ? "Audio Call"
+        : "Video Call";
+      if (!activeCall || !activeCall.terminalLogged) {
+        if (activeCall) {
+          activeCall.status = "failed";
+          activeCall.updatedAt = now;
+          activeCall.terminalLogged = true;
+        }
+        await query(
+          `INSERT INTO messages (
+             conversation_id, sender_id, content, is_read, created_at,
+             message_type, call_action, duration_seconds
+           ) VALUES ($1, $2, $3, FALSE, CURRENT_TIMESTAMP, 'call_log', 'failed', 0)`,
+          [convId, userId, `${modeLabel} failed to connect`]
+        ).catch(() => {});
+      }
     } else if (type === "end") {
-      const duration = payload && payload.duration ? parseInt(payload.duration, 10) : 0;
-      await query(
-        `INSERT INTO messages (
-           conversation_id, sender_id, content, is_read, created_at,
-           message_type, call_action, duration_seconds
-         ) VALUES ($1, $2, $3, FALSE, CURRENT_TIMESTAMP, 'call_log', 'ended', $4)`,
-        [convId, userId, `Call ended (${duration}s)`, duration]
-      ).catch(() => {});
+      const duration = payload && payload.duration ? Math.max(0, parseInt(payload.duration, 10) || 0) : 0;
+      if (!activeCall || !activeCall.terminalLogged) {
+        if (activeCall) {
+          activeCall.status = "ended";
+          activeCall.updatedAt = now;
+          activeCall.terminalLogged = true;
+        }
+        await query(
+          `INSERT INTO messages (
+             conversation_id, sender_id, content, is_read, created_at,
+             message_type, call_action, duration_seconds
+           ) VALUES ($1, $2, $3, FALSE, CURRENT_TIMESTAMP, 'call_log', 'ended', $4)`,
+          [convId, userId, `Call ended (${duration}s)`, duration]
+        ).catch(() => {});
+        await query(`UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP WHERE id = $1`, [convId]).catch(() => {});
+      }
     }
 
-    return response.status(200).json({ success: true, signal: signalObj });
+    return response.status(200).json({
+      success: true,
+      signal: signalObj,
+      latestSeq: seq,
+      activeCall: activeCall || null,
+    });
   } catch (error) {
     console.error("Error processing call signal:", error);
     return response.status(500).json({ error: error.message });
@@ -5070,41 +5452,81 @@ application.post("/api/calls/signal", authenticateToken, async (request, respons
 
 /**
  * ENDPOINT: GET /api/calls/signal/:conversationId
- * Retrieves pending WebRTC signals directed to current user.
+ * Retrieves pending WebRTC signals directed to the current user for the specified conversation,
+ * plus any ringing incoming calls across the user's other conversations.
  */
 application.get("/api/calls/signal/:conversationId", authenticateToken, async (request, response) => {
   try {
     const userId = request.user.userId;
     const convId = parseInt(request.params.conversationId, 10);
-    const since = request.query.since ? parseInt(request.query.since, 10) : (Date.now() - 10000);
+    if (isNaN(convId)) {
+      return response.status(400).json({ error: "Invalid conversation ID." });
+    }
 
-    const convRes = await query(
-      `SELECT c.id, c.user1_id, c.user2_id, c.session_id, sb.status as session_status
-       FROM conversations c
-       LEFT JOIN session_bookings sb ON c.session_id = sb.id
-       WHERE c.id = $1`,
-      [convId]
-    );
-    if (convRes.rows.length === 0) {
+    const hasSinceSeq = request.query.sinceSeq !== undefined && request.query.sinceSeq !== "";
+    const sinceSeq = hasSinceSeq ? parseInt(request.query.sinceSeq, 10) : null;
+    const since = request.query.since ? parseInt(request.query.since, 10) : (Date.now() - 15000);
+
+    const conv = await resolveConversationForCall(convId);
+    if (!conv) {
       return response.status(404).json({ error: "Conversation not found." });
     }
-    const conv = convRes.rows[0];
     if (conv.user1_id !== userId && conv.user2_id !== userId) {
       return response.status(403).json({ error: "Unauthorized: You are not a participant in this conversation." });
     }
-    if (conv.session_status && !["accepted", "confirmed"].includes(conv.session_status)) {
+    const effectiveSessionStatus = conv.direct_session_id ? conv.direct_session_status : conv.session_status;
+    if (effectiveSessionStatus && !["accepted", "confirmed"].includes(effectiveSessionStatus)) {
       return response.status(403).json({
-        error: `Calling signals are only accessible for accepted sessions (current session status: "${conv.session_status}").`,
+        error: `Calling signals are only accessible for accepted sessions (current session status: "${effectiveSessionStatus}").`,
       });
     }
 
     const queue = callSignalingMap.get(convId) || [];
-    // Return signals created by the peer that arrived after 'since'
-    const pending = queue.filter((s) => s.from !== userId && s.timestamp > since);
+    const pending = queue.filter((s) => {
+      if (s.from === userId) return false;
+      if (sinceSeq !== null && !isNaN(sinceSeq) && sinceSeq > 0) {
+        return s.seq > sinceSeq;
+      }
+      return s.timestamp >= since;
+    });
+
+    const latestSeq = queue.length > 0 ? queue[queue.length - 1].seq : (sinceSeq || 0);
+
+    // Expire stale ringing calls older than 45 seconds
+    const now = Date.now();
+    const currentActiveCall = getOrInitActiveCallState(convId);
+    if (currentActiveCall && currentActiveCall.status === "ringing" && now - currentActiveCall.startedAt > 45000) {
+      currentActiveCall.status = "missed";
+      currentActiveCall.updatedAt = now;
+    }
+
+    // Also check if the user has any ringing incoming call in any of their conversations
+    const incomingCalls = [];
+    for (const [cId, callState] of activeCallStateMap.entries()) {
+      if (
+        callState &&
+        callState.calleeId === userId &&
+        callState.status === "ringing" &&
+        now - callState.startedAt <= 45000
+      ) {
+        incomingCalls.push({
+          conversationId: cId,
+          callId: callState.callId,
+          callerId: callState.callerId,
+          callerName: callState.callerName,
+          mode: callState.mode,
+          startedAt: callState.startedAt,
+          hasOffer: Boolean(callState.offer),
+        });
+      }
+    }
 
     return response.status(200).json({
       signals: pending,
-      serverTime: Date.now(),
+      latestSeq,
+      serverTime: now,
+      activeCall: currentActiveCall || null,
+      incomingCalls,
     });
   } catch (error) {
     return response.status(500).json({ error: error.message });

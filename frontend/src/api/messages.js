@@ -98,11 +98,22 @@ export async function sendCallSignal(conversationId, type, payload = {}) {
 /**
  * Polls WebRTC call signals directed to the current user.
  * @param {number|string} conversationId
- * @param {number} since - Timestamp
+ * @param {number|{since?: number, sinceSeq?: number}} sinceOrOptions - Timestamp or options object
  */
-export async function getCallSignals(conversationId, since) {
-  const queryParam = since ? `?since=${since}` : '';
-  return await request(`/calls/signal/${conversationId}${queryParam}`, {
+export async function getCallSignals(conversationId, sinceOrOptions) {
+  const params = new URLSearchParams();
+  if (typeof sinceOrOptions === 'number') {
+    params.set('since', String(sinceOrOptions));
+  } else if (sinceOrOptions && typeof sinceOrOptions === 'object') {
+    if (sinceOrOptions.since !== undefined && sinceOrOptions.since !== null) {
+      params.set('since', String(sinceOrOptions.since));
+    }
+    if (sinceOrOptions.sinceSeq !== undefined && sinceOrOptions.sinceSeq !== null) {
+      params.set('sinceSeq', String(sinceOrOptions.sinceSeq));
+    }
+  }
+  const qs = params.toString();
+  return await request(`/calls/signal/${conversationId}${qs ? `?${qs}` : ''}`, {
     method: 'GET',
   });
 }
