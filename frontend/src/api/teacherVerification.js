@@ -87,12 +87,29 @@ export async function reviewApplication(applicationId, decisionPayload) {
 }
 
 /**
+ * Submits corrected or additional verification documents for an existing application.
+ *
+ * @param {string} applicationId
+ * @param {FormData} formData
+ * @returns {Promise<{ message: string, application: object, precheck: object }>}
+ */
+export async function resubmitVerificationApplication(applicationId, formData) {
+  return await request(`/teacher-verification/applications/${applicationId}/resubmit`, {
+    method: 'POST',
+    body: formData,
+  });
+}
+
+/**
  * Builds the secure authenticated URL to download or view a document.
+ * Includes the JWT token parameter for inline browser opening.
  *
  * @param {string} applicationId
  * @param {'resume'|'certificate'} docType
  * @returns {string}
  */
 export function getDocumentUrl(applicationId, docType) {
-  return `/api/teacher-verification/documents/${applicationId}/${docType}`;
+  const token = localStorage.getItem('token');
+  const query = token ? `?token=${encodeURIComponent(token)}` : '';
+  return `/api/teacher-verification/documents/${applicationId}/${docType}${query}`;
 }

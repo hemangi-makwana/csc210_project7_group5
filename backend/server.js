@@ -34,6 +34,7 @@
 
 const path = require("path");
 const fs = require("fs");
+const zlib = require("zlib");
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
@@ -53,7 +54,7 @@ const ReputationEngine = require("./dsa/reputationEngine");
 const { validateFileSignature } = require("./utils/fileValidation");
 
 // Designated Sole Reviewer Email (strictly enforced on server, case-insensitive)
-const SOLE_REVIEWER_EMAIL = "kailashsampath15@gmail.com".toLowerCase();
+const SOLE_REVIEWER_EMAIL = (process.env.REVIEWER_EMAIL || "kailashsampath15@gmail.com").trim().toLowerCase();
 
 // Active User Presence Heartbeat Map (userId -> timestamp)
 const userPresenceMap = new Map();
@@ -1138,13 +1139,13 @@ application.get("/api/skills/search", async (request, response) => {
                   ) FILTER (WHERE s.type = 'teach'),
                   '[]'::jsonb
                 ) as skill_entries,
-                BOOL_OR(COALESCE(s.is_verified, FALSE)) as is_verified
+                BOOL_OR(CASE WHEN LOWER(s.skill_name) LIKE LOWER($1) AND COALESCE(s.is_verified, FALSE) = TRUE THEN TRUE ELSE FALSE END) as is_verified
          FROM users u
          JOIN skills s ON u.id = s.user_id
          WHERE s.type = 'teach'
          GROUP BY u.id, u.name, u.role, u.bio, u.profile_summary, u.reputation_score, u.is_demo, u.avatar_url
          HAVING BOOL_OR(LOWER(s.skill_name) LIKE LOWER($1))
-         ORDER BY BOOL_OR(COALESCE(s.is_verified, FALSE)) DESC, u.reputation_score DESC`,
+         ORDER BY MAX(CASE WHEN LOWER(s.skill_name) LIKE LOWER($1) AND COALESCE(s.is_verified, FALSE) = TRUE THEN 1 ELSE 0 END) DESC, u.reputation_score DESC`,
         [`%${cleanQuery}%`]
       );
 
@@ -3734,6 +3735,106 @@ application.get("/api/mentor-listings/:userId", async (request, response) => {
 // ----------------------------------------------------------------------------
 
 /**
+ * Safely extracts real plain text from supported uploaded files (PDF, DOCX) using Node.js built-ins.
+ * - For DOCX: Locates 'word/document.xml' within the zip stream, decompresses it with zlib, and strips XML tags.
+ * - For PDF: Extracts text from text operators (BT ... ET, Tj, TJ) with /FlateDecode decompression.
+ * - Never treats raw binary bytes as ASCII text. Returns empty string if text cannot be safely extracted.
+ * - The pre-check remains strictly advisory: human reviewers make all final decisions.
+ */
+function extractDocumentText(filePath, originalName = "") {
+  if (!filePath || !fs.existsSync(filePath)) return "";
+  try {
+    const buffer = fs.readFileSync(filePath);
+    if (!buffer || buffer.length === 0) return "";
+    const ext = path.extname(originalName || filePath).toLowerCase();
+
+    // 1. DOCX (PKZIP containing word/document.xml)
+    if (ext === ".docx" || (buffer[0] === 0x50 && buffer[1] === 0x4b && buffer[2] === 0x03 && buffer[3] === 0x04)) {
+      try {
+        let offset = 0;
+        while (offset < buffer.length - 30) {
+          if (buffer[offset] === 0x50 && buffer[offset + 1] === 0x4b && buffer[offset + 2] === 0x03 && buffer[offset + 3] === 0x04) {
+            const compMethod = buffer.readUInt16LE(offset + 8);
+            const compSize = buffer.readUInt32LE(offset + 18);
+            const fileNameLen = buffer.readUInt16LE(offset + 26);
+            const extraLen = buffer.readUInt16LE(offset + 28);
+            const nameStart = offset + 30;
+            const name = buffer.toString("utf8", nameStart, nameStart + fileNameLen);
+            const dataStart = nameStart + fileNameLen + extraLen;
+
+            if (name === "word/document.xml" && dataStart + compSize <= buffer.length) {
+              const slice = buffer.slice(dataStart, dataStart + compSize);
+              let xml = "";
+              if (compMethod === 8) {
+                xml = zlib.inflateRawSync(slice).toString("utf8");
+              } else if (compMethod === 0) {
+                xml = slice.toString("utf8");
+              }
+              if (xml) {
+                return xml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+              }
+            }
+            offset = dataStart + compSize;
+          } else {
+            offset++;
+          }
+        }
+      } catch (docxErr) {
+        // Fallback gracefully on parsing edge cases
+      }
+    }
+
+    // 2. PDF (stream objects and text operators BT ... ET)
+    if (ext === ".pdf" || buffer.slice(0, 5).toString() === "%PDF-") {
+      let extracted = [];
+      try {
+        const content = buffer.toString("latin1");
+        const streamRegex = /<<([\s\S]*?)>>[\r\n\s]*stream[\r\n\s]([\s\S]*?)endstream/g;
+        let match;
+        while ((match = streamRegex.exec(content)) !== null) {
+          const dict = match[1];
+          const streamData = match[2];
+          let streamBuf = Buffer.from(streamData, "latin1");
+
+          if (dict.includes("/FlateDecode")) {
+            try {
+              streamBuf = zlib.inflateSync(streamBuf);
+            } catch (e) {
+              try {
+                streamBuf = zlib.inflateRawSync(streamBuf);
+              } catch (e2) {}
+            }
+          }
+
+          const decodedStr = streamBuf.toString("latin1");
+          const textRegex = /\(([^)]+)\)\s*(?:Tj|'|")/g;
+          let tm;
+          while ((tm = textRegex.exec(decodedStr)) !== null) {
+            extracted.push(tm[1]);
+          }
+          const tjRegex = /\[(.*?)\]\s*TJ/g;
+          while ((tm = tjRegex.exec(decodedStr)) !== null) {
+            const parts = tm[1].match(/\(([^)]+)\)/g);
+            if (parts) {
+              parts.forEach((p) => extracted.push(p.slice(1, -1)));
+            }
+          }
+        }
+        if (extracted.length > 0) {
+          return extracted.join(" ").replace(/[^\x20-\x7E\n\r\t]/g, " ").replace(/\s+/g, " ").trim();
+        }
+      } catch (pdfErr) {
+        // Fallback gracefully
+      }
+    }
+
+    return "";
+  } catch (err) {
+    return "";
+  }
+}
+
+/**
  * ENDPOINT: POST /api/teacher-verification/apply
  *
  * Dedicated teacher verification application submission:
@@ -3819,15 +3920,10 @@ application.post(
         }
       }
 
-      // Read text content from resume for precheck if possible
+      // Safely extract real text content from resume for precheck
       let textForPrecheck = (resumeText && typeof resumeText === "string") ? resumeText.trim() : "";
       if (!textForPrecheck && resumeFile) {
-        try {
-          const buf = fs.readFileSync(resumeFile.path);
-          textForPrecheck = buf.toString("latin1").replace(/[^\x20-\x7E\n\r\t]/g, " ");
-        } catch (readErr) {
-          textForPrecheck = "";
-        }
+        textForPrecheck = extractDocumentText(resumeFile.path, resumeFile.originalname);
       }
 
       // Execute rules-based precheck via ResumePreChecker
@@ -3839,30 +3935,45 @@ application.post(
         hasCertificate: Boolean(certFile),
         resumeFormatValid: resumeFile ? [".pdf", ".docx"].includes(path.extname(resumeFile.originalname).toLowerCase()) : true,
         certificateFormatValid: certFile ? [".pdf", ".jpg", ".jpeg", ".png"].includes(path.extname(certFile.originalname).toLowerCase()) : true,
-        skillKeywordMatches: precheckDiagnostic.matchedKeywords.length,
-        hasStandardSections: precheckDiagnostic.detectedSections.length >= 2,
-        hasDateAnomalies: precheckDiagnostic.dateAnomalies.length > 0,
+        skillKeywordMatches: (precheckDiagnostic.matchedKeywords || precheckDiagnostic.keywordMatches || []).length,
+        hasStandardSections: (precheckDiagnostic.detectedSections || []).length >= 2,
+        hasDateAnomalies: (precheckDiagnostic.dateAnomalies || precheckDiagnostic.anomalies || []).length > 0,
       });
 
       const appId = `tva_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
       const combinedPrecheck = {
         diagnostic: precheckDiagnostic,
         decisionTree: decisionEvaluation,
-        preliminaryNotice: "Preliminary automated check assists applicant and reviewer. Final decision is adjudicated by human reviewers. Review typically takes 2 business days.",
+        textExtracted: Boolean(textForPrecheck && textForPrecheck.length > 0),
+        extractedLength: textForPrecheck ? textForPrecheck.length : 0,
+        preliminaryNotice: "Preliminary automated completeness & keyword check assists applicant and reviewer. Does not verify the factual truth of qualifications, nor does it automatically approve or reject any applicant. A human reviewer makes every decision. Review typically takes 2 business days.",
       };
+
+      const submissionType = (resumeFile && certFile) ? 'both' : (resumeFile ? 'resume_only' : 'certificate_only');
+      const initialHistory = JSON.stringify([
+        {
+          action: "initial_submission",
+          timestamp: new Date().toISOString(),
+          submission_type: submissionType,
+          has_resume: Boolean(resumeFile),
+          has_certificate: Boolean(certFile),
+          notes: notes ? notes.trim() : null,
+        },
+      ]);
 
       const insertRes = await query(
         `INSERT INTO teacher_verification_applications (
-           id, user_id, skill_name, status,
+           id, user_id, skill_name, status, submission_type,
            resume_filename, resume_original_name, resume_mimetype, resume_size,
            certificate_filename, certificate_original_name, certificate_mimetype, certificate_size,
-           precheck_results, created_at, updated_at
-         ) VALUES ($1, $2, $3, 'submitted', $4, $5, $6, $7, $8, $9, $10, $11, $12, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+           precheck_results, history, created_at, updated_at
+         ) VALUES ($1, $2, $3, 'submitted', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
          RETURNING *`,
         [
           appId,
           userId,
           canonicalSkill,
+          submissionType,
           resumeFile ? resumeFile.filename : null,
           resumeFile ? resumeFile.originalname : null,
           resumeFile ? resumeFile.mimetype : null,
@@ -3872,6 +3983,7 @@ application.post(
           certFile ? certFile.mimetype : null,
           certFile ? certFile.size : null,
           JSON.stringify(combinedPrecheck),
+          initialHistory,
         ]
       );
 
@@ -3884,9 +3996,25 @@ application.post(
           "verification_submitted",
           "Verification Application Submitted",
           `Your verification application for "${canonicalSkill}" has been submitted. Review typically takes 2 business days.`,
-          "/verification",
+          "/teacher-verification",
         ]
       ).catch(() => {});
+
+      // In-app notification for the designated reviewer
+      const reviewerUser = await query("SELECT id FROM users WHERE LOWER(email) = $1", [SOLE_REVIEWER_EMAIL]);
+      if (reviewerUser.rows.length > 0) {
+        await query(
+          `INSERT INTO notifications (user_id, type, title, message, link)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            reviewerUser.rows[0].id,
+            "verification_submitted",
+            "New Verification Application",
+            `A new teacher verification application was submitted for "${canonicalSkill}" (Application ID: ${appId}).`,
+            "/reviewer",
+          ]
+        ).catch(() => {});
+      }
 
       return response.status(201).json({
         message: "Application submitted successfully. Review typically takes 2 business days.",
@@ -3905,6 +4033,228 @@ application.post(
 );
 
 /**
+ * ENDPOINT: POST /api/teacher-verification/applications/:id/resubmit
+ *
+ * Allows an applicant to submit corrected or additional documents
+ * (resume, certificate, or both) for an existing application, while
+ * preserving application history and previous reviewer feedback.
+ */
+application.post(
+  "/api/teacher-verification/applications/:id/resubmit",
+  authenticateToken,
+  (request, response, next) => {
+    documentUpload.fields([
+      { name: "resume", maxCount: 1 },
+      { name: "certificate", maxCount: 1 },
+    ])(request, response, (err) => {
+      if (err instanceof multer.MulterError) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          return response.status(400).json({ error: "File size exceeds the 5MB limit." });
+        }
+        return response.status(400).json({ error: `File upload error: ${err.message}` });
+      } else if (err) {
+        return response.status(400).json({ error: err.message });
+      }
+      next();
+    });
+  },
+  async (request, response) => {
+    try {
+      const userId = request.user.userId;
+      const appId = request.params.id;
+      const { notes, resumeText } = request.body;
+
+      const appRes = await query(
+        "SELECT * FROM teacher_verification_applications WHERE id = $1",
+        [appId]
+      );
+
+      if (appRes.rows.length === 0) {
+        return response.status(404).json({ error: "Verification application not found." });
+      }
+
+      const app = appRes.rows[0];
+
+      if (app.user_id !== userId) {
+        return response.status(403).json({
+          error: "Unauthorized. You may only resubmit documents for your own application.",
+        });
+      }
+
+      if (app.status === "approved") {
+        return response.status(400).json({
+          error: "This application is already approved. No further documents are required.",
+        });
+      }
+
+      const newResume = request.files && request.files["resume"] ? request.files["resume"][0] : null;
+      const newCert = request.files && request.files["certificate"] ? request.files["certificate"][0] : null;
+
+      if (!newResume && !newCert && (!notes || typeof notes !== "string" || notes.trim() === "")) {
+        return response.status(400).json({
+          error: "Please provide at least one updated document (resume or certificate) or an explanatory note.",
+        });
+      }
+
+      // Strict file signature validation for newly uploaded files
+      if (newResume) {
+        const sig = validateFileSignature(newResume.path, newResume.mimetype);
+        if (!sig.valid) {
+          try { fs.unlinkSync(newResume.path); } catch (e) {}
+          if (newCert) try { fs.unlinkSync(newCert.path); } catch (e) {}
+          return response.status(400).json({
+            error: `Resume file validation failed: ${sig.reason}`,
+          });
+        }
+      }
+
+      if (newCert) {
+        const sig = validateFileSignature(newCert.path, newCert.mimetype);
+        if (!sig.valid) {
+          if (newResume) try { fs.unlinkSync(newResume.path); } catch (e) {}
+          try { fs.unlinkSync(newCert.path); } catch (e) {}
+          return response.status(400).json({
+            error: `Certificate file validation failed: ${sig.reason}`,
+          });
+        }
+      }
+
+      // Preserve application history
+      const existingHistory = Array.isArray(app.history) ? app.history : [];
+      const historyEntry = {
+        action: "resubmitted_documents",
+        timestamp: new Date().toISOString(),
+        previous_status: app.status,
+        previous_resume: app.resume_original_name || null,
+        previous_certificate: app.certificate_original_name || null,
+        previous_reviewer_notes: app.reviewer_notes || null,
+        previous_rejection_reason: app.rejection_reason || null,
+        new_resume_uploaded: Boolean(newResume),
+        new_certificate_uploaded: Boolean(newCert),
+        applicant_notes: (notes && typeof notes === "string") ? notes.trim() : null,
+      };
+      const updatedHistory = JSON.stringify([...existingHistory, historyEntry]);
+
+      // Resolve final document pointers
+      const finalResumeFile = newResume ? newResume.filename : app.resume_filename;
+      const finalResumeOriginal = newResume ? newResume.originalname : app.resume_original_name;
+      const finalResumeMime = newResume ? newResume.mimetype : app.resume_mimetype;
+      const finalResumeSize = newResume ? newResume.size : app.resume_size;
+
+      const finalCertFile = newCert ? newCert.filename : app.certificate_filename;
+      const finalCertOriginal = newCert ? newCert.originalname : app.certificate_original_name;
+      const finalCertMime = newCert ? newCert.mimetype : app.certificate_mimetype;
+      const finalCertSize = newCert ? newCert.size : app.certificate_size;
+
+      const submissionType = (finalResumeFile && finalCertFile) ? "both" : (finalResumeFile ? "resume_only" : "certificate_only");
+
+      // Safely extract real text content from resume for precheck re-evaluation
+      let textForPrecheck = (resumeText && typeof resumeText === "string") ? resumeText.trim() : "";
+      if (!textForPrecheck && newResume) {
+        textForPrecheck = extractDocumentText(newResume.path, newResume.originalname);
+      }
+
+      const precheckDiagnostic = ResumePreChecker.analyze(textForPrecheck, app.skill_name);
+      const decisionEvaluation = verificationDecisionTree.evaluate({
+        hasResume: Boolean(finalResumeFile),
+        hasCertificate: Boolean(finalCertFile),
+        resumeFormatValid: finalResumeOriginal ? [".pdf", ".docx"].includes(path.extname(finalResumeOriginal).toLowerCase()) : true,
+        certificateFormatValid: finalCertOriginal ? [".pdf", ".jpg", ".jpeg", ".png"].includes(path.extname(finalCertOriginal).toLowerCase()) : true,
+        skillKeywordMatches: (precheckDiagnostic.matchedKeywords || precheckDiagnostic.keywordMatches || []).length,
+        hasStandardSections: (precheckDiagnostic.detectedSections || []).length >= 2,
+        hasDateAnomalies: (precheckDiagnostic.dateAnomalies || precheckDiagnostic.anomalies || []).length > 0,
+      });
+
+      const combinedPrecheck = {
+        diagnostic: precheckDiagnostic,
+        decisionTree: decisionEvaluation,
+        textExtracted: Boolean(textForPrecheck && textForPrecheck.length > 0),
+        extractedLength: textForPrecheck ? textForPrecheck.length : 0,
+        preliminaryNotice: "Preliminary automated completeness & keyword check assists applicant and reviewer. Does not verify the factual truth of qualifications, nor does it automatically approve or reject any applicant. A human reviewer makes every decision. Review typically takes 2 business days.",
+      };
+
+      const updateRes = await query(
+        `UPDATE teacher_verification_applications
+         SET status = 'submitted',
+             submission_type = $1,
+             resume_filename = $2,
+             resume_original_name = $3,
+             resume_mimetype = $4,
+             resume_size = $5,
+             certificate_filename = $6,
+             certificate_original_name = $7,
+             certificate_mimetype = $8,
+             certificate_size = $9,
+             precheck_results = $10,
+             history = $11,
+             rejection_reason = NULL,
+             reviewer_notes = $12,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $13
+         RETURNING *`,
+        [
+          submissionType,
+          finalResumeFile,
+          finalResumeOriginal,
+          finalResumeMime,
+          finalResumeSize,
+          finalCertFile,
+          finalCertOriginal,
+          finalCertMime,
+          finalCertSize,
+          JSON.stringify(combinedPrecheck),
+          updatedHistory,
+          notes ? `Applicant update: ${notes.trim()}` : null,
+          appId,
+        ]
+      );
+
+      // Notify applicant
+      await query(
+        `INSERT INTO notifications (user_id, type, title, message, link)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          userId,
+          "verification_resubmitted",
+          "Verification Documents Updated",
+          `Updated documents for "${app.skill_name}" have been submitted. Review is expected within 2 business days.`,
+          "/teacher-verification",
+        ]
+      ).catch(() => {});
+
+      // Notify sole reviewer
+      const reviewerUser = await query("SELECT id FROM users WHERE LOWER(email) = $1", [SOLE_REVIEWER_EMAIL]);
+      if (reviewerUser.rows.length > 0) {
+        await query(
+          `INSERT INTO notifications (user_id, type, title, message, link)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            reviewerUser.rows[0].id,
+            "verification_resubmitted",
+            "Updated Verification Documents",
+            `Applicant updated documents for "${app.skill_name}" (Application ID: ${app.id}).`,
+            "/reviewer",
+          ]
+        ).catch(() => {});
+      }
+
+      return response.status(200).json({
+        message: "Documents successfully updated and resubmitted. Review typically takes 2 business days.",
+        application: updateRes.rows[0],
+        precheck: combinedPrecheck,
+        estimatedReviewTime: "Typically 2 business days",
+      });
+    } catch (error) {
+      console.error("Error resubmitting teacher verification documents:", error);
+      return response.status(500).json({
+        error: "An error occurred while resubmitting documents.",
+        details: error.message,
+      });
+    }
+  }
+);
+
+/**
  * ENDPOINT: GET /api/teacher-verification/my-applications
  * Returns all verification applications submitted by the authenticated user.
  */
@@ -3915,10 +4265,10 @@ application.get(
     try {
       const userId = request.user.userId;
       const res = await query(
-        `SELECT id, user_id, skill_name, status,
+        `SELECT id, user_id, skill_name, status, submission_type,
                 resume_original_name, resume_size,
                 certificate_original_name, certificate_size,
-                precheck_results, reviewer_notes, rejection_reason, reviewed_at, created_at, updated_at
+                precheck_results, history, reviewer_notes, rejection_reason, reviewed_at, created_at, updated_at
          FROM teacher_verification_applications
          WHERE user_id = $1
          ORDER BY created_at DESC`,
@@ -4225,10 +4575,18 @@ application.post(
       else if (action === "mark_under_review") targetStatus = "under_review";
 
       // Validate transition using VerificationLifecycleManager
-      const transitionValidation = VerificationLifecycleManager.validateTransition(
-        app.status,
-        targetStatus
-      );
+      // Direct reviewer adjudication from 'submitted' is permitted by advancing through 'under_review'
+      let transitionValidation;
+      if (app.status === "submitted" && targetStatus !== "under_review") {
+        const toUnderReview = VerificationLifecycleManager.validateTransition("submitted", "under_review");
+        const toFinal = VerificationLifecycleManager.validateTransition("under_review", targetStatus);
+        transitionValidation = (!toUnderReview.allowed) ? toUnderReview : toFinal;
+      } else {
+        transitionValidation = VerificationLifecycleManager.validateTransition(
+          app.status,
+          targetStatus
+        );
+      }
       if (!transitionValidation.allowed) {
         return response.status(400).json({
           error: transitionValidation.reason,
@@ -4247,6 +4605,18 @@ application.post(
         });
       }
 
+      // Preserve adjudication in history
+      const existingHistory = Array.isArray(app.history) ? app.history : [];
+      const historyEvent = {
+        action: `reviewer_${action}`,
+        status: targetStatus,
+        reviewer_id: reviewerId,
+        timestamp: new Date().toISOString(),
+        rejection_reason: (action === "reject" && reason) ? reason.trim() : null,
+        reviewer_notes: notes ? notes.trim() : null,
+      };
+      const updatedHistory = JSON.stringify([...existingHistory, historyEvent]);
+
       // Execute review action
       if (action === "approve") {
         await query(
@@ -4254,10 +4624,11 @@ application.post(
            SET status = 'approved',
                reviewer_id = $1,
                reviewer_notes = $2,
+               history = $3,
                reviewed_at = CURRENT_TIMESTAMP,
                updated_at = CURRENT_TIMESTAMP
-           WHERE id = $3`,
-          [reviewerId, notes || "Approved after document verification.", appId]
+           WHERE id = $4`,
+          [reviewerId, notes || "Approved after document verification.", updatedHistory, appId]
         );
 
         // Check if skill entry already exists for user
@@ -4301,10 +4672,11 @@ application.post(
                reviewer_id = $1,
                rejection_reason = $2,
                reviewer_notes = $3,
+               history = $4,
                reviewed_at = CURRENT_TIMESTAMP,
                updated_at = CURRENT_TIMESTAMP
-           WHERE id = $4`,
-          [reviewerId, reason.trim(), notes || "", appId]
+           WHERE id = $5`,
+          [reviewerId, reason.trim(), notes || "", updatedHistory, appId]
         );
 
         await query(
@@ -4324,9 +4696,10 @@ application.post(
            SET status = 'needs_information',
                reviewer_id = $1,
                reviewer_notes = $2,
+               history = $3,
                updated_at = CURRENT_TIMESTAMP
-           WHERE id = $3`,
-          [reviewerId, notes.trim(), appId]
+           WHERE id = $4`,
+          [reviewerId, notes.trim(), updatedHistory, appId]
         );
 
         await query(
@@ -4345,9 +4718,10 @@ application.post(
           `UPDATE teacher_verification_applications
            SET status = 'under_review',
                reviewer_id = $1,
+               history = $2,
                updated_at = CURRENT_TIMESTAMP
-           WHERE id = $2`,
-          [reviewerId, appId]
+           WHERE id = $3`,
+          [reviewerId, updatedHistory, appId]
         );
       }
 

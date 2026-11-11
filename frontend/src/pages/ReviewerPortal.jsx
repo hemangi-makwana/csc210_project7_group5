@@ -897,14 +897,17 @@ export default function ReviewerPortal() {
                   marginBottom: '1.25rem',
                 }}
               >
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.45rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.45rem', flexWrap: 'wrap', gap: '0.5rem' }}>
                   <span style={{ fontWeight: '700', fontSize: '0.88rem', color: 'var(--color-primary)' }}>
-                    Deterministic Resume Pre-Check Findings
+                    Preliminary Automated Check Findings
                   </span>
                   <span style={{ fontSize: '0.72rem', color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
-                    Preliminary Guidance Only
+                    Assists Reviewer • Not an Automated Decision
                   </span>
                 </div>
+                <p style={{ fontSize: '0.8rem', color: 'var(--color-text-secondary)', margin: '0 0 0.5rem', lineHeight: '1.45' }}>
+                  <em>Automated check scans for relevant skill keywords and expected sections. It does not verify the factual truth of qualifications, nor does it automatically approve or reject any applicant. A human reviewer makes every decision.</em>
+                </p>
                 <div style={{ fontSize: '0.82rem', color: 'var(--color-text-secondary)', lineHeight: '1.5' }}>
                   {selectedApp.precheck_results.message && (
                     <div style={{ marginBottom: '0.45rem' }}>{selectedApp.precheck_results.message}</div>
@@ -931,6 +934,62 @@ export default function ReviewerPortal() {
               </div>
             )}
 
+            {/* Document Revision History */}
+            {selectedApp.history && Array.isArray(selectedApp.history) && selectedApp.history.length > 0 && (
+              <div
+                style={{
+                  padding: '0.85rem 1rem',
+                  borderRadius: '8px',
+                  backgroundColor: 'var(--color-bg-secondary)',
+                  border: '1px solid var(--color-border)',
+                  marginBottom: '1.25rem',
+                  fontSize: '0.84rem',
+                }}
+              >
+                <div style={{ fontWeight: '700', marginBottom: '0.45rem', color: 'var(--color-text-primary)' }}>
+                  Application & Revision History ({selectedApp.history.length} events)
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                  {selectedApp.history.map((h, hIdx) => (
+                    <div
+                      key={hIdx}
+                      style={{
+                        padding: '0.45rem 0.65rem',
+                        borderRadius: '6px',
+                        backgroundColor: 'var(--color-surface)',
+                        border: '1px solid var(--color-border-subtle)',
+                        fontSize: '0.8rem',
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.15rem' }}>
+                        <strong style={{ textTransform: 'capitalize' }}>
+                          {h.action ? h.action.replace('_', ' ') : 'Event'}
+                        </strong>
+                        <span style={{ color: 'var(--color-text-muted)', fontSize: '0.74rem' }}>
+                          {formatDate(h.timestamp)}
+                        </span>
+                      </div>
+                      {h.applicant_notes && (
+                        <div style={{ color: 'var(--color-text-secondary)' }}>
+                          Applicant note: "{h.applicant_notes}"
+                        </div>
+                      )}
+                      {h.reviewer_notes && (
+                        <div style={{ color: 'var(--color-text-secondary)' }}>
+                          Reviewer note: "{h.reviewer_notes}"
+                        </div>
+                      )}
+                      {h.rejection_reason && (
+                        <div style={{ color: '#dc2626' }}>
+                          Rejection reason: "{h.rejection_reason}"
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Status History & Previous Decision */}
             {(selectedApp.reviewer_notes || selectedApp.rejection_reason || selectedApp.reviewed_at) && (
               <div
@@ -944,7 +1003,7 @@ export default function ReviewerPortal() {
                 }}
               >
                 <div style={{ fontWeight: '700', marginBottom: '0.35rem', color: 'var(--color-text-primary)' }}>
-                  Decision Record
+                  Latest Decision Record
                 </div>
                 {selectedApp.reviewed_at && (
                   <div style={{ color: 'var(--color-text-muted)', marginBottom: '0.25rem' }}>

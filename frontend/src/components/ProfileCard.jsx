@@ -32,9 +32,12 @@ export function ProfileCard({ user, matchScore = null, matchReason = null, break
   if (!user) return null;
 
 
-  // Separate taught skills and wanted skills
-  const taughtSkills = (user.skills || []).filter(s => typeof s === 'string' || s.type === 'teach');
-  const wantedSkills = (user.skills || []).filter(s => typeof s !== 'string' && s.type === 'learn');
+  // Separate taught skills and wanted skills (prefer rich skill_entries with is_verified status if present)
+  const allSkills = (user.skill_entries && Array.isArray(user.skill_entries) && user.skill_entries.length > 0)
+    ? user.skill_entries
+    : (user.skills || []);
+  const taughtSkills = allSkills.filter(s => typeof s === 'string' || s.type === 'teach');
+  const wantedSkills = allSkills.filter(s => typeof s !== 'string' && s.type === 'learn');
 
   const avatarSrc = user.avatar_url
     ? (user.avatar_url.startsWith('http') ? user.avatar_url : `http://localhost:5000${user.avatar_url}`)

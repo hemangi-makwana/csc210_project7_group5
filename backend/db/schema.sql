@@ -254,6 +254,7 @@ ALTER TABLE session_bookings ADD COLUMN IF NOT EXISTS conversation_id INT REFERE
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS session_id VARCHAR(64) REFERENCES session_bookings(id) ON DELETE SET NULL;
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS is_closed BOOLEAN DEFAULT FALSE;
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE teacher_verification_applications ADD COLUMN IF NOT EXISTS history JSONB DEFAULT '[]'::jsonb;
 
 
 

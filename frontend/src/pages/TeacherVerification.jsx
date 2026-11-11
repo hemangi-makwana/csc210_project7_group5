@@ -16,6 +16,7 @@ import { useAuth } from '../context/AuthContext.jsx';
 import { getUserProfile, getSkillCatalog } from '../api/skills.js';
 import {
   submitVerificationApplication,
+  resubmitVerificationApplication,
   getMyVerificationApplications,
   getDocumentUrl,
 } from '../api/teacherVerification.js';
@@ -28,6 +29,28 @@ import {
   SkillsIcon,
   ShieldCheckIcon,
 } from '../components/Icons.jsx';
+
+/**
+ * Validates uploaded file client-side for size and format.
+ */
+function validateUploadedFile(file, allowedExtensions, label = 'Document', maxSizeMB = 5) {
+  if (!file) return { valid: true };
+  const maxBytes = maxSizeMB * 1024 * 1024;
+  if (file.size > maxBytes) {
+    return {
+      valid: false,
+      error: `${label} file size (${(file.size / (1024 * 1024)).toFixed(1)}MB) exceeds the ${maxSizeMB}MB limit.`,
+    };
+  }
+  const ext = '.' + (file.name.split('.').pop() || '').toLowerCase();
+  if (!allowedExtensions.includes(ext)) {
+    return {
+      valid: false,
+      error: `Invalid ${label.toLowerCase()} format "${ext}". Allowed types: ${allowedExtensions.join(', ')}.`,
+    };
+  }
+  return { valid: true };
+}
 
 export function TeacherVerification() {
   const { user, isTeacher, isLearner, setMode, isDarkMode } = useAuth();
@@ -52,6 +75,13 @@ export function TeacherVerification() {
   const [resumeText, setResumeText] = useState('');
   const [resumeFile, setResumeFile] = useState(null);
   const [certificateFile, setCertificateFile] = useState(null);
+
+  // Resubmission state for existing applications
+  const [resubmittingAppId, setResubmittingAppId] = useState(null);
+  const [resubmitResumeFile, setResubmitResumeFile] = useState(null);
+  const [resubmitCertFile, setResubmitCertFile] = useState(null);
+  const [resubmitNotes, setResubmitNotes] = useState('');
+  const [isResubmitting, setIsResubmitting] = useState(false);
 
   // UI state
   const [isLoading, setIsLoading] = useState(true);
@@ -124,14 +154,20 @@ export function TeacherVerification() {
       return;
     }
 
-    // Validate file sizes (<= 5MB)
-    if (resumeFile && resumeFile.size > 5 * 1024 * 1024) {
-      setErrorMessage('Resume file size exceeds the 5MB limit.');
-      return;
+    // Validate file types and sizes (<= 5MB)
+    if (resumeFile) {
+      const v = validateUploadedFile(resumeFile, ['.pdf', '.docx'], 'Resume');
+      if (!v.valid) {
+        setErrorMessage(v.error);
+        return;
+      }
     }
-    if (certificateFile && certificateFile.size > 5 * 1024 * 1024) {
-      setErrorMessage('Certificate file size exceeds the 5MB limit.');
-      return;
+    if (certificateFile) {
+      const v = validateUploadedFile(certificateFile, ['.pdf', '.jpg', '.jpeg', '.png'], 'Certificate');
+      if (!v.valid) {
+        setErrorMessage(v.error);
+        return;
+      }
     }
 
     setIsSubmitting(true);
@@ -163,6 +199,59 @@ export function TeacherVerification() {
       setErrorMessage(err.message || 'Failed to submit verification application.');
     } finally {
       setIsSubmitting(false);
+    }
+  }
+
+  // Handle document resubmission / updates for an existing application
+  async function handleResubmitApplication(appId) {
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    if (!resubmitResumeFile && !resubmitCertFile && !resubmitNotes.trim()) {
+      setErrorMessage('Please provide an updated resume, certificate, or explanatory notes.');
+      return;
+    }
+
+    if (resubmitResumeFile) {
+      const v = validateUploadedFile(resubmitResumeFile, ['.pdf', '.docx'], 'Resume');
+      if (!v.valid) {
+        setErrorMessage(v.error);
+        return;
+      }
+    }
+
+    if (resubmitCertFile) {
+      const v = validateUploadedFile(resubmitCertFile, ['.pdf', '.jpg', '.jpeg', '.png'], 'Certificate');
+      if (!v.valid) {
+        setErrorMessage(v.error);
+        return;
+      }
+    }
+
+    setIsResubmitting(true);
+    try {
+      const formData = new FormData();
+      if (resubmitResumeFile) formData.append('resume', resubmitResumeFile);
+      if (resubmitCertFile) formData.append('certificate', resubmitCertFile);
+      if (resubmitNotes.trim()) formData.append('notes', resubmitNotes.trim());
+
+      const res = await resubmitVerificationApplication(appId, formData);
+      setSuccessMessage(
+        res.message || 'Updated documents received. Review is expected within 2 business days.'
+      );
+
+      // Reset resubmission state
+      setResubmittingAppId(null);
+      setResubmitResumeFile(null);
+      setResubmitCertFile(null);
+      setResubmitNotes('');
+
+      // Refresh data
+      await loadData();
+    } catch (err) {
+      setErrorMessage(err.message || 'Failed to resubmit verification documents.');
+    } finally {
+      setIsResubmitting(false);
     }
   }
 
@@ -535,82 +624,283 @@ export function TeacherVerification() {
                 You have not submitted any verification applications yet.
               </div>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                {applications.map((app) => (
-                  <div key={app.id} className="card" style={{ padding: '1.5rem' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '0.75rem' }}>
-                      <div>
-                        <h3 style={{ fontSize: '1.15rem', fontWeight: '800', margin: '0 0 0.35rem' }}>
-                          {app.skill_name}
-                        </h3>
-                        <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
-                          Submitted: {new Date(app.created_at).toLocaleString()}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                {applications.map((app) => {
+                  const precheck = app.precheck_results || {};
+                  const diag = precheck.diagnostic || {};
+                  const isUnderReviewOrSubmitted = ['submitted', 'under_review'].includes(app.status);
+                  const canResubmit = ['needs_information', 'rejected', 'submitted'].includes(app.status);
+                  const isResubmitOpen = resubmittingAppId === app.id;
+                  const historyList = Array.isArray(app.history) ? app.history : [];
+
+                  return (
+                    <div key={app.id} className="card" style={{ padding: '1.5rem', borderRadius: '12px' }}>
+                      {/* Top Header */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '0.75rem' }}>
+                        <div>
+                          <h3 style={{ fontSize: '1.25rem', fontWeight: '800', margin: '0 0 0.35rem' }}>
+                            {app.skill_name}
+                          </h3>
+                          <div style={{ fontSize: '0.82rem', color: 'var(--color-text-muted)' }}>
+                            Submitted: {new Date(app.created_at).toLocaleDateString()} at {new Date(app.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            {app.reviewed_at && (
+                              <span> • Reviewed on {new Date(app.reviewed_at).toLocaleDateString()}</span>
+                            )}
+                          </div>
+                        </div>
+                        <span className={`status-chip ${app.status}`} style={{ textTransform: 'capitalize', fontWeight: '700' }}>
+                          {app.status.replace('_', ' ')}
+                        </span>
+                      </div>
+
+                      {/* Timeline / Expected Review Notice */}
+                      {isUnderReviewOrSubmitted && (
+                        <div
+                          style={{
+                            padding: '0.75rem 1rem',
+                            borderRadius: '8px',
+                            backgroundColor: 'rgba(59, 130, 246, 0.08)',
+                            border: '1px solid rgba(59, 130, 246, 0.25)',
+                            fontSize: '0.86rem',
+                            color: 'var(--color-primary)',
+                            marginBottom: '1rem',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.5rem',
+                          }}
+                        >
+                          <ShieldCheckIcon size={18} />
+                          <span>
+                            <strong>Estimated Review Time:</strong> Our review team typically processes submissions within <strong>2 business days</strong>.
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Uploaded Documents */}
+                      <div style={{ marginBottom: '1rem' }}>
+                        <div style={{ fontSize: '0.78rem', fontWeight: '700', color: 'var(--color-text-muted)', textTransform: 'uppercase', marginBottom: '0.45rem' }}>
+                          Uploaded Verification Documents
+                        </div>
+                        <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                          {app.resume_original_name ? (
+                            <a
+                              href={getDocumentUrl(app.id, 'resume')}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="btn btn-secondary btn-sm"
+                              style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.82rem' }}
+                            >
+                              📄 View Resume ({app.resume_original_name}) ↗
+                            </a>
+                          ) : (
+                            <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
+                              No resume attached
+                            </span>
+                          )}
+
+                          {app.certificate_original_name ? (
+                            <a
+                              href={getDocumentUrl(app.id, 'certificate')}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="btn btn-secondary btn-sm"
+                              style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.82rem' }}
+                            >
+                              <VerifiedBadgeIcon size={14} />
+                              View Certificate ({app.certificate_original_name}) ↗
+                            </a>
+                          ) : (
+                            <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
+                              No certificate attached
+                            </span>
+                          )}
                         </div>
                       </div>
-                      <span className={`status-chip ${app.status}`}>
-                        {app.status.replace('_', ' ')}
-                      </span>
-                    </div>
 
-                    {/* Uploaded Documents */}
-                    <div style={{ marginTop: '1rem', display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
-                      {app.resume_original_name && (
-                        <a
-                          href={getDocumentUrl(app.id, 'resume')}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="btn btn-secondary"
-                          style={{ fontSize: '0.85rem', padding: '0.4rem 0.85rem' }}
+                      {/* Reviewer Feedback / Decisions */}
+                      {app.rejection_reason && (
+                        <div
+                          style={{
+                            marginBottom: '1rem',
+                            padding: '0.85rem 1rem',
+                            borderRadius: '8px',
+                            backgroundColor: 'rgba(239, 68, 68, 0.08)',
+                            border: '1px solid rgba(239, 68, 68, 0.3)',
+                            fontSize: '0.88rem',
+                            color: 'var(--color-danger)',
+                          }}
                         >
-                          📄 View Resume ({app.resume_original_name})
-                        </a>
+                          <strong>Reviewer Decision — Rejection Reason:</strong> {app.rejection_reason}
+                        </div>
                       )}
-                      {app.certificate_original_name && (
-                        <a
-                          href={getDocumentUrl(app.id, 'certificate')}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="btn btn-secondary"
-                          style={{ fontSize: '0.85rem', padding: '0.4rem 0.85rem' }}
+
+                      {app.reviewer_notes && (
+                        <div
+                          style={{
+                            marginBottom: '1rem',
+                            padding: '0.85rem 1rem',
+                            borderRadius: '8px',
+                            backgroundColor: app.status === 'needs_information' ? 'rgba(168, 85, 247, 0.1)' : 'rgba(245, 158, 11, 0.1)',
+                            border: '1px solid ' + (app.status === 'needs_information' ? 'rgba(168, 85, 247, 0.3)' : 'rgba(245, 158, 11, 0.3)'),
+                            fontSize: '0.88rem',
+                            color: app.status === 'needs_information' ? '#7e22ce' : '#b45309',
+                          }}
                         >
-                          View Certificate ({app.certificate_original_name})
-                        </a>
+                          <strong>{app.status === 'needs_information' ? 'Action Required — Reviewer Requested Information:' : 'Reviewer Note:'}</strong> {app.reviewer_notes}
+                        </div>
+                      )}
+
+                      {/* Resume Screening / Pre-Check Findings Card */}
+                      {(diag.keywordMatches || diag.detectedSections || diag.anomalies) && (
+                        <div
+                          style={{
+                            padding: '0.85rem 1rem',
+                            borderRadius: '8px',
+                            backgroundColor: 'rgba(37, 99, 235, 0.04)',
+                            border: '1px solid var(--color-border)',
+                            marginBottom: '1rem',
+                            fontSize: '0.84rem',
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.35rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+                            <span style={{ fontWeight: '700', color: 'var(--color-primary)' }}>
+                              Automated Preliminary Check Findings
+                            </span>
+                            <span style={{ fontSize: '0.74rem', color: 'var(--color-text-muted)' }}>
+                              Assists Reviewer • Not a Final Decision
+                            </span>
+                          </div>
+                          <p style={{ fontSize: '0.8rem', color: 'var(--color-text-secondary)', margin: '0 0 0.5rem', lineHeight: '1.45' }}>
+                            <em>Preliminary automated check scans document completeness and skill keyword relevance. It does not verify the factual truth of qualifications or automatically approve/reject an applicant. A human reviewer makes every decision.</em>
+                          </p>
+                          {diag.keywordMatches && diag.keywordMatches.length > 0 && (
+                            <div style={{ fontSize: '0.8rem', color: 'var(--color-text-secondary)', marginBottom: '0.2rem' }}>
+                              <strong>Relevant Keywords Detected:</strong> {diag.keywordMatches.join(', ')}
+                            </div>
+                          )}
+                          {diag.detectedSections && diag.detectedSections.length > 0 && (
+                            <div style={{ fontSize: '0.8rem', color: 'var(--color-text-secondary)', marginBottom: '0.2rem' }}>
+                              <strong>Resume Sections Identified:</strong> {diag.detectedSections.join(', ')}
+                            </div>
+                          )}
+                          {diag.anomalies && diag.anomalies.length > 0 && (
+                            <div style={{ fontSize: '0.8rem', color: 'var(--color-danger)', marginTop: '0.2rem' }}>
+                              <strong>Notes:</strong> {diag.anomalies.join('; ')}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Application Revision History */}
+                      {historyList.length > 1 && (
+                        <div style={{ marginBottom: '1rem', padding: '0.75rem 1rem', borderRadius: '8px', backgroundColor: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)', fontSize: '0.82rem' }}>
+                          <div style={{ fontWeight: '700', marginBottom: '0.4rem', color: 'var(--color-text-secondary)' }}>
+                            Document Revision History ({historyList.length} updates)
+                          </div>
+                          <ul style={{ margin: 0, paddingLeft: '1.25rem', color: 'var(--color-text-muted)' }}>
+                            {historyList.map((h, hIdx) => (
+                              <li key={hIdx} style={{ marginBottom: '0.25rem' }}>
+                                <span>{new Date(h.timestamp).toLocaleDateString()} {new Date(h.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}: </span>
+                                <strong style={{ textTransform: 'capitalize' }}>{h.action ? h.action.replace('_', ' ') : 'Update'}</strong>
+                                {h.applicant_notes && <span> — "{h.applicant_notes}"</span>}
+                                {h.reviewer_notes && <span> — Reviewer: "{h.reviewer_notes}"</span>}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {/* Resubmission Section */}
+                      {canResubmit && (
+                        <div style={{ marginTop: '0.75rem', borderTop: '1px solid var(--color-border-subtle)', paddingTop: '0.75rem' }}>
+                          {!isResubmitOpen ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setResubmittingAppId(app.id);
+                                setResubmitResumeFile(null);
+                                setResubmitCertFile(null);
+                                setResubmitNotes('');
+                              }}
+                              className="btn btn-outline btn-sm"
+                              style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontWeight: '600' }}
+                            >
+                              <span>Submit Corrected or Additional Documents</span>
+                              &rarr;
+                            </button>
+                          ) : (
+                            <div style={{ padding: '1rem', borderRadius: '8px', backgroundColor: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)' }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                                <strong style={{ fontSize: '0.92rem' }}>Resubmit Documents for "{app.skill_name}"</strong>
+                                <button
+                                  type="button"
+                                  onClick={() => setResubmittingAppId(null)}
+                                  className="btn btn-sm btn-outline"
+                                  style={{ padding: '0.2rem 0.6rem', fontSize: '0.78rem' }}
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+
+                              <p style={{ fontSize: '0.82rem', color: 'var(--color-text-muted)', marginBottom: '0.75rem' }}>
+                                Upload replacement or supplemental files. Your previous history will be preserved.
+                              </p>
+
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem', marginBottom: '0.75rem' }}>
+                                <div>
+                                  <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: '700', marginBottom: '0.25rem' }}>
+                                    Replacement Resume (PDF/DOCX, max 5MB)
+                                  </label>
+                                  <input
+                                    type="file"
+                                    accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                    onChange={(e) => setResubmitResumeFile(e.target.files[0] || null)}
+                                    style={{ fontSize: '0.82rem' }}
+                                  />
+                                </div>
+                                <div>
+                                  <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: '700', marginBottom: '0.25rem' }}>
+                                    Replacement Certificate (PDF/JPG/PNG, max 5MB)
+                                  </label>
+                                  <input
+                                    type="file"
+                                    accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
+                                    onChange={(e) => setResubmitCertFile(e.target.files[0] || null)}
+                                    style={{ fontSize: '0.82rem' }}
+                                  />
+                                </div>
+                              </div>
+
+                              <div style={{ marginBottom: '0.75rem' }}>
+                                <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: '700', marginBottom: '0.25rem' }}>
+                                  Notes on what was updated (optional)
+                                </label>
+                                <input
+                                  type="text"
+                                  value={resubmitNotes}
+                                  onChange={(e) => setResubmitNotes(e.target.value)}
+                                  placeholder="e.g. Attached higher resolution certificate with verifiable URL"
+                                  className="form-input"
+                                  style={{ fontSize: '0.85rem' }}
+                                />
+                              </div>
+
+                              <button
+                                type="button"
+                                disabled={isResubmitting || (!resubmitResumeFile && !resubmitCertFile && !resubmitNotes.trim())}
+                                onClick={() => handleResubmitApplication(app.id)}
+                                className="btn btn-primary btn-sm"
+                                style={{ fontWeight: '700' }}
+                              >
+                                {isResubmitting ? 'Submitting...' : 'Upload & Resubmit Application'}
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       )}
                     </div>
-
-                    {/* Reviewer Feedback / Decisions */}
-                    {app.rejection_reason && (
-                      <div
-                        style={{
-                          marginTop: '1rem',
-                          padding: '0.85rem',
-                          borderRadius: 'var(--radius-sm)',
-                          backgroundColor: 'rgba(239, 68, 68, 0.1)',
-                          border: '1px solid rgba(239, 68, 68, 0.25)',
-                          fontSize: '0.88rem',
-                          color: 'var(--color-danger)',
-                        }}
-                      >
-                        <strong>Rejection Reason:</strong> {app.rejection_reason}
-                      </div>
-                    )}
-                    {app.reviewer_notes && (
-                      <div
-                        style={{
-                          marginTop: '0.75rem',
-                          padding: '0.85rem',
-                          borderRadius: 'var(--radius-sm)',
-                          backgroundColor: 'rgba(245, 158, 11, 0.1)',
-                          border: '1px solid rgba(245, 158, 11, 0.25)',
-                          fontSize: '0.88rem',
-                          color: '#b45309',
-                        }}
-                      >
-                        <strong>Reviewer Note:</strong> {app.reviewer_notes}
-                      </div>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

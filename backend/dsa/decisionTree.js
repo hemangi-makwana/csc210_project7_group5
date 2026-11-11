@@ -411,6 +411,7 @@ class ResumePreChecker {
       skillName: Array.isArray(skillOrSkills) ? skillOrSkills.join(', ') : (skillOrSkills || ''),
       directMentions: directMentionCount,
       keywordMatches: matchedKeywords,
+      matchedKeywords: matchedKeywords,
       detectedSkills: matchedKeywords,
       detectedSections,
       missingSections,

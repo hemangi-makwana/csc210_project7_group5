@@ -110,6 +110,7 @@ export function App() {
               }
             />
             <Route path="/reviewer" element={<ReviewerPortal />} />
+            <Route path="/reviewer-portal" element={<Navigate to="/reviewer" replace />} />
             <Route path="/requests" element={<CourseRequests />} />
 
             <Route path="/notifications" element={<Notifications />} />
