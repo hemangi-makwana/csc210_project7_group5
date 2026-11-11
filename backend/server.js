@@ -1128,15 +1128,15 @@ application.get("/api/skills/search", async (request, response) => {
                 u.reputation_score as "reputationScore", u.is_demo, u.avatar_url,
                 COALESCE(array_agg(s.skill_name) FILTER (WHERE s.type = 'teach'), '{}') as skills,
                 COALESCE(
-                  json_agg(
-                    json_build_object(
+                  jsonb_agg(
+                    jsonb_build_object(
                       'skill_name', s.skill_name,
                       'level', s.level,
                       'type', s.type,
                       'is_verified', COALESCE(s.is_verified, FALSE)
                     )
                   ) FILTER (WHERE s.type = 'teach'),
-                  '[]'::json
+                  '[]'::jsonb
                 ) as skill_entries,
                 BOOL_OR(COALESCE(s.is_verified, FALSE)) as is_verified
          FROM users u
