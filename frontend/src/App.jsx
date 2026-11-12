@@ -21,6 +21,7 @@ import { MentorSearch } from './pages/MentorSearch.jsx';
 import { Recommendations } from './pages/Recommendations.jsx';
 import { SessionBooking } from './pages/SessionBooking.jsx';
 import { LearningHistory } from './pages/LearningHistory.jsx';
+import { SessionFeedback } from './pages/SessionFeedback.jsx';
 import { SkillProfile } from './pages/SkillProfile.jsx';
 import { CourseRequests } from './pages/CourseRequests.jsx';
 import { Notifications } from './pages/Notifications.jsx';
@@ -116,6 +117,7 @@ export function App() {
             <Route path="/recommendations" element={<Recommendations />} />
             <Route path="/booking" element={<SessionBooking />} />
             <Route path="/history" element={<LearningHistory />} />
+            <Route path="/sessions/:sessionId/feedback" element={<SessionFeedback />} />
             <Route path="/profile" element={<SkillProfile />} />
             <Route
               path="/teacher-verification"

@@ -1083,9 +1083,12 @@ export function SkillProfile() {
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.4rem' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
                         <span style={{ fontWeight: '700', fontSize: '0.92rem', color: 'var(--color-text-primary)' }}>
-                          {rev.reviewer_name || 'Learner'}
+                          {rev.reviewer_name || 'Anonymous Learner'}
                         </span>
-                        <StarRating rating={rev.rating} />
+                        <StarRating rating={Number(rev.rating)} showScore={false} />
+                        <span style={{ fontSize: '0.82rem', fontWeight: '600', color: 'var(--color-text-secondary)' }}>
+                          {Number(rev.rating)} / 5
+                        </span>
                         {rev.topic && (
                           <span
                             style={{

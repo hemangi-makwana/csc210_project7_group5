@@ -944,12 +944,24 @@ async function initializeDatabaseAndDsa() {
         }
       }
 
+      // Ensure structured feedback columns exist on reviews (idempotent, preserves existing data)
+      await query(`
+        ALTER TABLE reviews ADD COLUMN IF NOT EXISTS clarity_rating INT CHECK (clarity_rating >= 1 AND clarity_rating <= 5);
+        ALTER TABLE reviews ADD COLUMN IF NOT EXISTS interaction_rating INT CHECK (interaction_rating >= 1 AND interaction_rating <= 5);
+        ALTER TABLE reviews ADD COLUMN IF NOT EXISTS preparation_rating INT CHECK (preparation_rating >= 1 AND preparation_rating <= 5);
+        ALTER TABLE reviews ADD COLUMN IF NOT EXISTS materials_rating INT CHECK (materials_rating >= 1 AND materials_rating <= 5);
+        ALTER TABLE reviews ADD COLUMN IF NOT EXISTS engagement_rating INT CHECK (engagement_rating >= 1 AND engagement_rating <= 5);
+        ALTER TABLE reviews ADD COLUMN IF NOT EXISTS feedback_answers JSONB DEFAULT '{}'::jsonb;
+        ALTER TABLE reviews ADD COLUMN IF NOT EXISTS session_score NUMERIC(4, 2);
+      `).catch(() => {});
+
       // Populate ReputationEngine Hash Table and Graph edge weights from PostgreSQL reviews
       const reviewsRes = await query(`
-        SELECT r.id, r.session_id, r.mentor_id, r.reviewer_id, r.rating, r.comment, r.created_at,
-               u.name AS reviewer_name, sb.topic AS topic
+        SELECT r.id, r.session_id, r.mentor_id, r.reviewer_id, r.rating, r.comment,
+               r.clarity_rating, r.interaction_rating, r.preparation_rating,
+               r.materials_rating, r.engagement_rating, r.feedback_answers, r.session_score,
+               r.created_at, sb.topic AS topic
         FROM reviews r
-        LEFT JOIN users u ON r.reviewer_id = u.id
         LEFT JOIN session_bookings sb ON r.session_id = sb.id
         WHERE r.mentor_id IS NOT NULL AND r.reviewer_id IS NOT NULL
         ORDER BY r.created_at DESC
@@ -2035,7 +2047,7 @@ application.post("/api/sessions/:id/complete", authenticateToken, async (request
 
     await query("UPDATE session_bookings SET status = 'completed' WHERE id = $1", [sessionId]);
 
-    // Notify learner to leave feedback
+    // Notify learner to leave feedback on the dedicated session feedback page
     await query(
       `INSERT INTO notifications (user_id, type, title, message, link)
        VALUES ($1, $2, $3, $4, $5)`,
@@ -2043,8 +2055,8 @@ application.post("/api/sessions/:id/complete", authenticateToken, async (request
         session.learner_id,
         "session_completed",
         "Session Completed - Leave Feedback",
-        `Your session on "${session.topic}" has concluded. You can now leave a review!`,
-        "/history?view=learning",
+        `Your session on "${session.topic}" has concluded. Share your session feedback and rating!`,
+        `/sessions/${sessionId}/feedback`,
       ]
     ).catch(() => {});
 
@@ -2749,22 +2761,28 @@ application.get("/api/users/:userId/profile", async (request, response) => {
       if (dbResult.rows.length > 0) {
         const u = dbResult.rows[0];
         const reviewsRes = await query(
-          `SELECT r.id, r.session_id, r.reviewer_id, r.mentor_id, r.rating, r.comment, r.created_at,
-                  rev.name as reviewer_name, rev.avatar_url as reviewer_avatar,
-                  sb.topic as topic
+          `SELECT r.id, r.mentor_id, r.rating, r.comment,
+                  r.clarity_rating, r.interaction_rating, r.preparation_rating,
+                  r.materials_rating, r.engagement_rating, r.feedback_answers, r.session_score,
+                  r.created_at, sb.topic as topic
            FROM reviews r
-           LEFT JOIN users rev ON r.reviewer_id = rev.id
            LEFT JOIN session_bookings sb ON r.session_id = sb.id
            WHERE r.mentor_id = $1
            ORDER BY r.created_at DESC, r.id DESC`,
           [targetUserId]
         );
-        const reviews = reviewsRes.rows || [];
+        const rawReviews = reviewsRes.rows || [];
+        const reviews = rawReviews.map((r) => ReputationEngine.sanitizeReviewForTeacher(r));
+        const structuredSummary = ReputationEngine.summarizeStructuredFeedback(reviews);
         const repSummary = reputationEngine.getTeacherReputation(targetUserId);
         const dbRep = parseFloat(u.reputation_score);
         const effectiveRep = reviews.length > 0
-          ? (repSummary.reviewCount > 0 ? repSummary.boundedReputation : ReputationEngine.calculateBoundedScore(reviews.map((r) => r.rating)))
+          ? (repSummary.reviewCount > 0 ? repSummary.boundedReputation : ReputationEngine.calculateBoundedScore(reviews))
           : Math.min(5.0, Math.max(1.0, !isNaN(dbRep) ? dbRep : 4.0));
+
+        const verifiedTeachSkills = (u.skills || []).filter(
+          (s) => s && s.type === "teach" && s.is_verified === true
+        );
 
         return response.status(200).json({
           id: u.id,
@@ -2784,10 +2802,20 @@ application.get("/api/users/:userId/profile", async (request, response) => {
           review_count: reviews.length,
           reviewCount: reviews.length,
           reviews,
+          feedbackSummary: {
+            reputationScore: effectiveRep,
+            reviewCount: reviews.length,
+            categoryAverages: structuredSummary.categoryAverages,
+            dimensionBreakdown: structuredSummary.dimensionBreakdown,
+            improvementAreas: structuredSummary.improvementAreas,
+            strengths: structuredSummary.strengths,
+          },
           active_mode: u.active_mode || "learner",
           can_teach: u.can_teach !== false,
           can_learn: u.can_learn !== false,
           skills: u.skills || [],
+          verified_skills: verifiedTeachSkills,
+          verifiedSkills: verifiedTeachSkills,
         });
       }
       return response.status(404).json({ error: "User not found." });
@@ -2808,7 +2836,7 @@ application.get("/api/users/:userId/profile", async (request, response) => {
 
 /**
  * ENDPOINT 4D: GET /api/users/:userId/reviews
- * Retrieves authentic learner feedback and bounded reputation summary for a teacher.
+ * Retrieves authentic learner feedback (with learner identity kept private) and bounded reputation summary for a teacher.
  */
 application.get("/api/users/:userId/reviews", async (request, response) => {
   try {
@@ -2824,22 +2852,24 @@ application.get("/api/users/:userId/reviews", async (request, response) => {
     }
 
     const reviewsRes = await query(
-      `SELECT r.id, r.session_id, r.reviewer_id, r.mentor_id, r.rating, r.comment, r.created_at,
-              rev.name as reviewer_name, rev.avatar_url as reviewer_avatar,
-              sb.topic as topic
+      `SELECT r.id, r.mentor_id, r.rating, r.comment,
+              r.clarity_rating, r.interaction_rating, r.preparation_rating,
+              r.materials_rating, r.engagement_rating, r.feedback_answers, r.session_score,
+              r.created_at, sb.topic as topic
        FROM reviews r
-       LEFT JOIN users rev ON r.reviewer_id = rev.id
        LEFT JOIN session_bookings sb ON r.session_id = sb.id
        WHERE r.mentor_id = $1
        ORDER BY r.created_at DESC, r.id DESC`,
       [targetUserId]
     );
 
-    const reviews = reviewsRes.rows || [];
+    const rawReviews = reviewsRes.rows || [];
+    const reviews = rawReviews.map((r) => ReputationEngine.sanitizeReviewForTeacher(r));
+    const structuredSummary = ReputationEngine.summarizeStructuredFeedback(reviews);
     const repSummary = reputationEngine.getTeacherReputation(targetUserId);
     const dbRep = parseFloat(userRes.rows[0].reputation_score);
     const effectiveRep = reviews.length > 0
-      ? (repSummary.reviewCount > 0 ? repSummary.boundedReputation : ReputationEngine.calculateBoundedScore(reviews.map((r) => r.rating)))
+      ? (repSummary.reviewCount > 0 ? repSummary.boundedReputation : ReputationEngine.calculateBoundedScore(reviews))
       : Math.min(5.0, Math.max(1.0, !isNaN(dbRep) ? dbRep : 4.0));
 
     return response.status(200).json({
@@ -2850,6 +2880,14 @@ application.get("/api/users/:userId/reviews", async (request, response) => {
       reviewCount: reviews.length,
       rawAverage: repSummary.rawAverage || null,
       reviews,
+      feedbackSummary: {
+        reputationScore: effectiveRep,
+        reviewCount: reviews.length,
+        categoryAverages: structuredSummary.categoryAverages,
+        dimensionBreakdown: structuredSummary.dimensionBreakdown,
+        improvementAreas: structuredSummary.improvementAreas,
+        strengths: structuredSummary.strengths,
+      },
     });
   } catch (error) {
     console.error("Error fetching user reviews:", error);
@@ -2927,22 +2965,28 @@ application.get("/api/users/:userId", async (request, response) => {
       if (dbResult.rows.length > 0) {
         const u = dbResult.rows[0];
         const reviewsRes = await query(
-          `SELECT r.id, r.session_id, r.reviewer_id, r.mentor_id, r.rating, r.comment, r.created_at,
-                  rev.name as reviewer_name, rev.avatar_url as reviewer_avatar,
-                  sb.topic as topic
+          `SELECT r.id, r.mentor_id, r.rating, r.comment,
+                  r.clarity_rating, r.interaction_rating, r.preparation_rating,
+                  r.materials_rating, r.engagement_rating, r.feedback_answers, r.session_score,
+                  r.created_at, sb.topic as topic
            FROM reviews r
-           LEFT JOIN users rev ON r.reviewer_id = rev.id
            LEFT JOIN session_bookings sb ON r.session_id = sb.id
            WHERE r.mentor_id = $1
            ORDER BY r.created_at DESC, r.id DESC`,
           [targetUserId]
         );
-        const reviews = reviewsRes.rows || [];
+        const rawReviews = reviewsRes.rows || [];
+        const reviews = rawReviews.map((r) => ReputationEngine.sanitizeReviewForTeacher(r));
+        const structuredSummary = ReputationEngine.summarizeStructuredFeedback(reviews);
         const repSummary = reputationEngine.getTeacherReputation(targetUserId);
         const dbRep = parseFloat(u.reputation_score);
         const effectiveRep = reviews.length > 0
-          ? (repSummary.reviewCount > 0 ? repSummary.boundedReputation : ReputationEngine.calculateBoundedScore(reviews.map((r) => r.rating)))
+          ? (repSummary.reviewCount > 0 ? repSummary.boundedReputation : ReputationEngine.calculateBoundedScore(reviews))
           : Math.min(5.0, Math.max(1.0, !isNaN(dbRep) ? dbRep : 4.0));
+
+        const verifiedTeachSkills = (u.skills || []).filter(
+          (s) => s && s.type === "teach" && s.is_verified === true
+        );
 
         return response.status(200).json({
           id: u.id,
@@ -2962,7 +3006,17 @@ application.get("/api/users/:userId", async (request, response) => {
           review_count: reviews.length,
           reviewCount: reviews.length,
           reviews,
+          feedbackSummary: {
+            reputationScore: effectiveRep,
+            reviewCount: reviews.length,
+            categoryAverages: structuredSummary.categoryAverages,
+            dimensionBreakdown: structuredSummary.dimensionBreakdown,
+            improvementAreas: structuredSummary.improvementAreas,
+            strengths: structuredSummary.strengths,
+          },
           skills: u.skills || [],
+          verified_skills: verifiedTeachSkills,
+          verifiedSkills: verifiedTeachSkills,
         });
       }
     }
@@ -3007,6 +3061,10 @@ application.get("/api/users/:userId", async (request, response) => {
  * ENDPOINT 6: GET /api/users/:userId/history
  *
  * Retrieves past and upcoming sessions for the user from PostgreSQL.
+ * - In Learner mode: returns learner's sessions with their own submitted review on completed sessions.
+ * - In Teacher mode: keeps learner identity private on feedback! Individual teaching session cards
+ *   do NOT expose which learner submitted which review; instead, returns anonymized feedback and
+ *   structured improvement areas in `anonymousFeedback` and `feedbackSummary`.
  */
 application.get("/api/users/:userId/history", async (request, response) => {
   try {
@@ -3050,7 +3108,18 @@ application.get("/api/users/:userId/history", async (request, response) => {
                 'is_demo', l.is_demo
               ) as learner,
               CASE WHEN r.id IS NOT NULL THEN
-                json_build_object('id', r.id, 'rating', r.rating, 'comment', r.comment, 'created_at', r.created_at)
+                json_build_object(
+                  'id', r.id,
+                  'rating', r.rating,
+                  'comment', r.comment,
+                  'clarity_rating', r.clarity_rating,
+                  'interaction_rating', r.interaction_rating,
+                  'preparation_rating', r.preparation_rating,
+                  'materials_rating', r.materials_rating,
+                  'engagement_rating', r.engagement_rating,
+                  'feedback_answers', COALESCE(r.feedback_answers, '{}'::jsonb),
+                  'created_at', r.created_at
+                )
               ELSE NULL END as review
        FROM session_bookings sb
        JOIN users m ON sb.mentor_id = m.id
@@ -3061,13 +3130,85 @@ application.get("/api/users/:userId/history", async (request, response) => {
       [targetUserId]
     );
 
-    const rows = dbResult.rows || [];
+    const rawRows = dbResult.rows || [];
+
+    // Protect learner privacy in Teacher view: strip per-session review link from individual student session rows
+    const rows = rawRows.map((row) => {
+      if (isTeacherHistory) {
+        return {
+          ...row,
+          review: null,
+        };
+      }
+      if (row.review) {
+        const qs = ReputationEngine.extractStructuredQuestions(row.review);
+        return {
+          ...row,
+          review: {
+            ...row.review,
+            rating: Math.max(1, Math.min(5, Math.round(Number(row.review.rating) || 0))),
+            questions: qs,
+          },
+        };
+      }
+      return row;
+    });
+
+    const incomingRequests = isTeacherHistory
+      ? rows.filter((r) => r.status === "pending" || r.status === "queued")
+      : [];
+    const acceptedTeachingSessions = isTeacherHistory
+      ? rows.filter((r) => r.status !== "pending" && r.status !== "queued")
+      : [];
+
+    let anonymousFeedback = [];
+    let feedbackSummary = null;
+
+    if (isTeacherHistory) {
+      const teacherReviewsRes = await query(
+        `SELECT r.id, r.mentor_id, r.rating, r.comment,
+                r.clarity_rating, r.interaction_rating, r.preparation_rating,
+                r.materials_rating, r.engagement_rating, r.feedback_answers, r.session_score,
+                r.created_at, sb.topic AS topic
+         FROM reviews r
+         LEFT JOIN session_bookings sb ON r.session_id = sb.id
+         WHERE r.mentor_id = $1
+         ORDER BY r.created_at DESC, r.id DESC`,
+        [targetUserId]
+      );
+      anonymousFeedback = (teacherReviewsRes.rows || []).map((r) =>
+        ReputationEngine.sanitizeReviewForTeacher(r)
+      );
+      const structuredSummary = ReputationEngine.summarizeStructuredFeedback(anonymousFeedback);
+      const repRecord = reputationEngine.getTeacherReputation(targetUserId);
+      const userRepRes = await query("SELECT reputation_score FROM users WHERE id = $1", [targetUserId]);
+      const dbRep = userRepRes.rows[0] ? parseFloat(userRepRes.rows[0].reputation_score) : 4.0;
+      const effectiveRep =
+        anonymousFeedback.length > 0
+          ? repRecord.reviewCount > 0
+            ? repRecord.boundedReputation
+            : ReputationEngine.calculateBoundedScore(anonymousFeedback)
+          : Math.min(5.0, Math.max(1.0, !isNaN(dbRep) ? dbRep : 4.0));
+
+      feedbackSummary = {
+        reputationScore: effectiveRep,
+        reviewCount: anonymousFeedback.length,
+        categoryAverages: structuredSummary.categoryAverages,
+        dimensionBreakdown: structuredSummary.dimensionBreakdown,
+        improvementAreas: structuredSummary.improvementAreas,
+        strengths: structuredSummary.strengths,
+      };
+    }
 
     return response.status(200).json({
       role: isTeacherHistory ? "teacher" : "learner",
       sessions: rows,
       learningSessions: isTeacherHistory ? [] : rows,
       teachingSessions: isTeacherHistory ? rows : [],
+      incomingRequests,
+      acceptedTeachingSessions,
+      anonymousFeedback,
+      feedbackSummary,
       source: "postgresql",
     });
   } catch (error) {
@@ -3080,14 +3221,108 @@ application.get("/api/users/:userId/history", async (request, response) => {
 });
 
 /**
+ * ENDPOINT 6B: GET /api/sessions/:id/feedback
+ * Retrieves session context and existing feedback state for the dedicated learner feedback page.
+ * - Only the learner for the session can access this feedback form.
+ * - Reports whether the session is eligible (`status === 'completed'` and not yet reviewed).
+ * - Never exposes the teacher's updated reputation score on the learner feedback confirmation.
+ */
+application.get("/api/sessions/:id/feedback", authenticateToken, async (request, response) => {
+  try {
+    const sessionId = request.params.id;
+    const userId = request.user.userId;
+
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({
+        error: "Database unavailable. Could not load session feedback details.",
+      });
+    }
+
+    const sessRes = await query(
+      `SELECT sb.id, sb.mentor_id, sb.learner_id, sb.scheduled_at, sb.status, sb.topic, sb.notes,
+              sb.declined_reason, sb.conversation_id,
+              json_build_object(
+                'id', m.id,
+                'name', m.name,
+                'role', m.role,
+                'avatar_url', m.avatar_url,
+                'specialization_domain', m.specialization_domain
+              ) AS mentor
+       FROM session_bookings sb
+       JOIN users m ON sb.mentor_id = m.id
+       WHERE sb.id = $1`,
+      [sessionId]
+    );
+
+    if (sessRes.rows.length === 0) {
+      return response.status(404).json({
+        error: "Session not found.",
+      });
+    }
+
+    const session = sessRes.rows[0];
+    if (String(session.learner_id) !== String(userId)) {
+      return response.status(403).json({
+        error: "Only the learner who attended this session can access or submit session feedback.",
+      });
+    }
+
+    const revRes = await query(
+      `SELECT id, session_id, rating, comment,
+              clarity_rating, interaction_rating, preparation_rating,
+              materials_rating, engagement_rating, feedback_answers, created_at
+       FROM reviews
+       WHERE session_id = $1`,
+      [sessionId]
+    );
+
+    const existingRow = revRes.rows[0] || null;
+    const existingReview = existingRow
+      ? {
+          id: existingRow.id,
+          sessionId: existingRow.session_id,
+          session_id: existingRow.session_id,
+          rating: Math.max(1, Math.min(5, Math.round(Number(existingRow.rating) || 0))),
+          comment: existingRow.comment || "",
+          questions: ReputationEngine.extractStructuredQuestions(existingRow),
+          clarity_rating: existingRow.clarity_rating,
+          interaction_rating: existingRow.interaction_rating,
+          preparation_rating: existingRow.preparation_rating,
+          materials_rating: existingRow.materials_rating,
+          engagement_rating: existingRow.engagement_rating,
+          created_at: existingRow.created_at,
+        }
+      : null;
+
+    return response.status(200).json({
+      session,
+      questions: ReputationEngine.getFeedbackDimensions(),
+      canSubmitFeedback: session.status === "completed" && !existingReview,
+      alreadySubmitted: Boolean(existingReview),
+      review: existingReview,
+    });
+  } catch (error) {
+    console.error("Error loading session feedback context:", error);
+    return response.status(500).json({
+      error: "Failed to load session feedback details.",
+      details: error.message,
+    });
+  }
+});
+
+/**
  * ENDPOINT 7: POST /api/reviews
  *
- * Real session feedback workflow:
+ * Real learner session feedback workflow:
  * - Requires JWT authentication.
- * - Enforces: feedback form only shown to learner after session is marked completed.
+ * - Enforces: only the learner who attended a completed session may submit feedback.
+ * - Enforces: rejects pending, queued, accepted, confirmed, declined, or cancelled sessions.
  * - Enforces: exactly one review per completed booking in API and database.
- * - Stores rating (1-5) and feedback comment in PostgreSQL.
+ * - Stores exact integer star rating (1-5) without rounding or transformation, plus 5 structured
+ *   question ratings (clarity, interaction, preparation, materials, engagement) and written comment.
  * - Updates teacher reputation via custom HashTable & bounded Bayesian damped score.
+ * - Confirms feedback was recorded without displaying the teacher's updated reputation score to the learner.
  */
 application.post("/api/reviews", authenticateToken, async (request, response) => {
   try {
@@ -3105,7 +3340,7 @@ application.post("/api/reviews", authenticateToken, async (request, response) =>
     const numRating = Number(rating);
     if (!Number.isInteger(numRating) || numRating < 1 || numRating > 5) {
       return response.status(400).json({
-        error: "Rating must be an integer between 1 and 5.",
+        error: "Rating must be a whole number between 1 and 5.",
       });
     }
 
@@ -3114,6 +3349,45 @@ application.post("/api/reviews", authenticateToken, async (request, response) =>
       return response.status(400).json({
         error: "Written feedback must not exceed 1000 characters.",
       });
+    }
+
+    // Validate structured 5-question answers if provided
+    const dimensions = ReputationEngine.getFeedbackDimensions();
+    const rawQuestionsObj =
+      request.body.questions && typeof request.body.questions === "object"
+        ? request.body.questions
+        : request.body.feedback_answers && typeof request.body.feedback_answers === "object"
+        ? request.body.feedback_answers
+        : null;
+
+    const hasAnyStructuredField =
+      Boolean(rawQuestionsObj) ||
+      dimensions.some(
+        (d) => request.body[d.key] !== undefined || request.body[d.column] !== undefined
+      );
+
+    const structuredQuestions = {};
+    for (const dim of dimensions) {
+      const rawVal =
+        rawQuestionsObj && rawQuestionsObj[dim.key] !== undefined
+          ? rawQuestionsObj[dim.key]
+          : rawQuestionsObj && rawQuestionsObj[dim.column] !== undefined
+          ? rawQuestionsObj[dim.column]
+          : request.body[dim.key] !== undefined
+          ? request.body[dim.key]
+          : request.body[dim.column];
+
+      if (hasAnyStructuredField) {
+        const parsedQ = Number(rawVal);
+        if (!Number.isInteger(parsedQ) || parsedQ < 1 || parsedQ > 5) {
+          return response.status(400).json({
+            error: `Please answer "${dim.label}" with a rating from 1 to 5.`,
+          });
+        }
+        structuredQuestions[dim.key] = parsedQ;
+      } else {
+        structuredQuestions[dim.key] = numRating;
+      }
     }
 
     const conn = await checkConnection();
@@ -3142,7 +3416,7 @@ application.post("/api/reviews", authenticateToken, async (request, response) =>
       });
     }
 
-    // Enforce: session MUST be completed
+    // Enforce: session MUST be completed (reject pending, queued, accepted, confirmed, declined, cancelled)
     if (sess.status !== "completed") {
       return response.status(400).json({
         error: `Reviews can only be submitted for completed sessions. Current status is "${sess.status}".`,
@@ -3158,15 +3432,34 @@ application.post("/api/reviews", authenticateToken, async (request, response) =>
     }
 
     const reviewId = `rev_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const sessionScore = ReputationEngine.calculateReviewCompositeScore(numRating, structuredQuestions);
 
-    // Insert review into PostgreSQL
+    // Insert review into PostgreSQL — storing exact integer numRating in `rating`
     let createdAt = new Date().toISOString();
     try {
       const insertRes = await query(
-        `INSERT INTO reviews (id, session_id, reviewer_id, mentor_id, rating, comment, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+        `INSERT INTO reviews (
+           id, session_id, reviewer_id, mentor_id, rating, comment,
+           clarity_rating, interaction_rating, preparation_rating,
+           materials_rating, engagement_rating, feedback_answers, session_score, created_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, CURRENT_TIMESTAMP)
          RETURNING created_at`,
-        [reviewId, sessionId, userId, sess.mentor_id, numRating, cleanComment]
+        [
+          reviewId,
+          sessionId,
+          userId,
+          sess.mentor_id,
+          numRating,
+          cleanComment,
+          structuredQuestions.clarity,
+          structuredQuestions.interaction,
+          structuredQuestions.preparation,
+          structuredQuestions.materials,
+          structuredQuestions.engagement,
+          JSON.stringify(structuredQuestions),
+          sessionScore,
+        ]
       );
       if (insertRes.rows[0] && insertRes.rows[0].created_at) {
         createdAt = insertRes.rows[0].created_at;
@@ -3181,7 +3474,7 @@ application.post("/api/reviews", authenticateToken, async (request, response) =>
     }
 
     // Update teacher reputation using bounded Bayesian prior via ReputationEngine (HashTable + PostgreSQL)
-    const updatedReputation = await reputationEngine.updateTeacherReputationFromDatabase(
+    await reputationEngine.updateTeacherReputationFromDatabase(
       sess.mentor_id,
       query
     );
@@ -3192,36 +3485,37 @@ application.post("/api/reviews", authenticateToken, async (request, response) =>
     // Update relationship edge weight in the Adjacency Graph (DSA Feature)
     mentorGraph.updateEdgeWeight(sess.learner_id, sess.mentor_id, numRating, true);
 
-    const reputationSummary = reputationEngine.getTeacherReputation(sess.mentor_id);
-
-    // Notify mentor in-app
+    // Notify mentor in-app without revealing which learner submitted the feedback
     await query(
       `INSERT INTO notifications (user_id, type, title, message, link)
        VALUES ($1, $2, $3, $4, $5)`,
       [
         sess.mentor_id,
         "review_received",
-        "New Session Review Received",
-        `A learner submitted a ${numRating}-star review for "${sess.topic || "your session"}". Your reputation score is now ${Number(updatedReputation).toFixed(2)}.`,
+        "New Anonymous Session Feedback",
+        `Anonymous learner feedback (${numRating}/5 stars) was submitted for "${sess.topic || "your session"}". View your feedback and improvement areas in Teaching History.`,
         "/history?view=teaching",
       ]
     ).catch(() => {});
 
     return response.status(201).json({
       success: true,
-      message: "Session review recorded successfully! Teacher reputation updated.",
+      message: "Thank you! Your session feedback has been recorded.",
       review: {
         id: reviewId,
         sessionId,
         session_id: sessionId,
-        reviewer_id: userId,
         mentor_id: sess.mentor_id,
         rating: numRating,
         comment: cleanComment,
+        questions: structuredQuestions,
+        clarity_rating: structuredQuestions.clarity,
+        interaction_rating: structuredQuestions.interaction,
+        preparation_rating: structuredQuestions.preparation,
+        materials_rating: structuredQuestions.materials,
+        engagement_rating: structuredQuestions.engagement,
         created_at: createdAt,
       },
-      updatedReputation,
-      reputationSummary,
     });
   } catch (error) {
     console.error("Error submitting review:", error);

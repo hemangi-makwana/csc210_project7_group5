@@ -120,16 +120,31 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 
 -- 7. REVIEWS & RATINGS
--- Post-session peer reviews and star ratings (1 to 5).
+-- Post-session peer reviews, exact 1-5 star ratings, and structured 5-question evaluations.
 CREATE TABLE IF NOT EXISTS reviews (
-  id          VARCHAR(64) PRIMARY KEY,
-  session_id  VARCHAR(64) REFERENCES session_bookings(id) ON DELETE SET NULL,
-  reviewer_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  mentor_id   VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  rating      INT NOT NULL CHECK (rating >= 1 AND rating <= 5),
-  comment     TEXT,
-  created_at  TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+  id                 VARCHAR(64) PRIMARY KEY,
+  session_id         VARCHAR(64) REFERENCES session_bookings(id) ON DELETE SET NULL,
+  reviewer_id        VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  mentor_id          VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  rating             INT NOT NULL CHECK (rating >= 1 AND rating <= 5),
+  comment            TEXT,
+  clarity_rating     INT CHECK (clarity_rating >= 1 AND clarity_rating <= 5),
+  interaction_rating INT CHECK (interaction_rating >= 1 AND interaction_rating <= 5),
+  preparation_rating INT CHECK (preparation_rating >= 1 AND preparation_rating <= 5),
+  materials_rating   INT CHECK (materials_rating >= 1 AND materials_rating <= 5),
+  engagement_rating  INT CHECK (engagement_rating >= 1 AND engagement_rating <= 5),
+  feedback_answers   JSONB DEFAULT '{}'::jsonb,
+  session_score      NUMERIC(4, 2),
+  created_at         TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE reviews ADD COLUMN IF NOT EXISTS clarity_rating INT CHECK (clarity_rating >= 1 AND clarity_rating <= 5);
+ALTER TABLE reviews ADD COLUMN IF NOT EXISTS interaction_rating INT CHECK (interaction_rating >= 1 AND interaction_rating <= 5);
+ALTER TABLE reviews ADD COLUMN IF NOT EXISTS preparation_rating INT CHECK (preparation_rating >= 1 AND preparation_rating <= 5);
+ALTER TABLE reviews ADD COLUMN IF NOT EXISTS materials_rating INT CHECK (materials_rating >= 1 AND materials_rating <= 5);
+ALTER TABLE reviews ADD COLUMN IF NOT EXISTS engagement_rating INT CHECK (engagement_rating >= 1 AND engagement_rating <= 5);
+ALTER TABLE reviews ADD COLUMN IF NOT EXISTS feedback_answers JSONB DEFAULT '{}'::jsonb;
+ALTER TABLE reviews ADD COLUMN IF NOT EXISTS session_score NUMERIC(4, 2);
 -- 8. RETIRED: Formerly quiz_attempts (retired; teacher verification is now document-based)
 
 -- 8B. CANONICAL SKILL & COURSE CATALOG

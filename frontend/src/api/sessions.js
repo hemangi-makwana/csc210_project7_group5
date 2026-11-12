@@ -46,14 +46,27 @@ export async function getUserSessions(userId, role = null) {
 }
 
 /**
- * Submits a rating and written review for a completed session.
- * @param {object} reviewData - { sessionId, rating, comment }
- * @returns {Promise<{review: object, message: string, isMock?: boolean}>}
+ * Submits a learner's exact star rating, structured 5-question answers, and written feedback
+ * for a completed session.
+ * @param {object} reviewData - { sessionId, rating, comment, questions: { clarity, interaction, preparation, materials, engagement } }
+ * @returns {Promise<{review: object, message: string}>}
  */
 export async function submitSessionReview(reviewData) {
   return await request('/reviews', {
     method: 'POST',
     body: JSON.stringify(reviewData),
+  });
+}
+
+/**
+ * Loads the session context, feedback questions, and existing feedback state for the
+ * dedicated learner feedback page. Only the learner of the session may access it.
+ * @param {string} sessionId
+ * @returns {Promise<{session: object, questions: Array, canSubmitFeedback: boolean, alreadySubmitted: boolean, review: object|null}>}
+ */
+export async function getSessionFeedback(sessionId) {
+  return await request(`/sessions/${encodeURIComponent(sessionId)}/feedback`, {
+    method: 'GET',
   });
 }
 
