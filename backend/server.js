@@ -3566,47 +3566,77 @@ application.get("/api/recommendations/:userId", async (request, response) => {
     }
 
     if (conn.reachable) {
-      // 1. Fetch learner's desired skills (type = 'learn')
+      // 1. Fetch learner's saved learning interests (type = 'learn') and active skill requests
       const learnerSkillsRes = await query(
         `SELECT skill_name, level FROM skills WHERE user_id = $1 AND type = 'learn'`,
         [targetUserId]
       );
-      learnerDesiredSkills = learnerSkillsRes.rows || [];
+      const learnerRequestsRes = await query(
+        `SELECT title FROM course_requests WHERE requester_id = $1 AND status IN ('open', 'in_progress')`,
+        [targetUserId]
+      );
 
-      // If learner has no desired skills listed, return honest empty state
+      const seenDesired = new Set();
+      learnerDesiredSkills = [];
+      for (const row of learnerSkillsRes.rows || []) {
+        const name = (row.skill_name || "").trim();
+        if (!name) continue;
+        const key = name.toLowerCase();
+        if (!seenDesired.has(key)) {
+          seenDesired.add(key);
+          learnerDesiredSkills.push({ skill_name: name, level: row.level || "intermediate" });
+        }
+      }
+      for (const reqRow of learnerRequestsRes.rows || []) {
+        const name = (reqRow.title || "").trim();
+        if (!name) continue;
+        const key = name.toLowerCase();
+        if (!seenDesired.has(key)) {
+          seenDesired.add(key);
+          learnerDesiredSkills.push({ skill_name: name, level: "beginner" });
+        }
+      }
+
+      // If learner has no learning interests or skill requests listed, return honest empty state
       if (learnerDesiredSkills.length === 0) {
         return response.status(200).json({
           recommendations: [],
+          totalCount: 0,
           desiredSkills: [],
-          message: "Add skills you want to learn in your Profile to receive tailored mentor recommendations.",
+          message: "Add learning interests to your Profile or submit a skill request to receive matching mentor recommendations.",
           totalCandidatesEvaluated: 0,
-          algorithm: "Max-Heap Priority Queue with Graph BFS Proximity",
         });
       }
 
       const desiredLowerNames = learnerDesiredSkills.map((s) => s.skill_name.trim().toLowerCase());
 
-      // 2. Fetch only qualified mentors who actually teach at least one of the learner's desired skills
-      // Exclude the learner themselves ($1), and exclude generic learners or profiles with no matching teachable skills
+      // 2. Fetch all eligible mentors who have at least one VERIFIED teaching skill matching
+      // the learner's learning interests or skill requests (excluding the learner themselves).
       const dbResult = await query(
         `SELECT u.id, u.name, u.role, u.bio, u.reputation_score, u.avatar_url, u.is_demo,
                 (SELECT COUNT(*)::int FROM reviews r WHERE r.mentor_id = u.id) as review_count,
-                COALESCE(array_agg(DISTINCT s.skill_name) FILTER (WHERE s.type = 'teach' AND s.skill_name IS NOT NULL), '{}') as skills,
+                COALESCE(array_agg(DISTINCT s.skill_name) FILTER (WHERE s.type = 'teach' AND COALESCE(s.is_verified, FALSE) = TRUE AND s.skill_name IS NOT NULL), '{}') as skills,
                 COALESCE(
                   json_agg(
                     DISTINCT jsonb_build_object(
                       'skill_name', s.skill_name,
                       'level', s.level,
                       'type', s.type,
-                      'is_verified', COALESCE(s.is_verified, FALSE)
+                      'is_verified', TRUE
                     )
-                  ) FILTER (WHERE s.type = 'teach' AND s.skill_name IS NOT NULL),
+                  ) FILTER (WHERE s.type = 'teach' AND COALESCE(s.is_verified, FALSE) = TRUE AND s.skill_name IS NOT NULL),
                   '[]'::json
                 ) as skill_entries
          FROM users u
-         JOIN skills s ON u.id = s.user_id AND s.type = 'teach'
+         JOIN skills s ON u.id = s.user_id AND s.type = 'teach' AND COALESCE(s.is_verified, FALSE) = TRUE
          WHERE u.id <> $1
-           AND LOWER(s.skill_name) = ANY($2)
+           AND EXISTS (
+             SELECT 1 FROM skills sm
+             WHERE sm.user_id = u.id
+               AND sm.type = 'teach'
+               AND COALESCE(sm.is_verified, FALSE) = TRUE
+               AND LOWER(TRIM(sm.skill_name)) = ANY($2)
+           )
          GROUP BY u.id, u.name, u.role, u.bio, u.reputation_score, u.avatar_url, u.is_demo
          ORDER BY u.reputation_score DESC`,
         [targetUserId, desiredLowerNames]
@@ -3688,8 +3718,8 @@ application.get("/api/recommendations/:userId", async (request, response) => {
       recommendationHeap.insert(candidateRecord);
     }
 
-    // Extract top-6 ranked recommendations from Max-Heap in O(k log n) time
-    const topMentors = recommendationHeap.extractTopK(6);
+    // Extract ALL eligible ranked recommendations from Max-Heap (strongest to weakest)
+    const topMentors = recommendationHeap.extractTopK(recommendationHeap.size());
 
     const rankedRecommendations = topMentors.map((item, index) => ({
       ...item.mentor,
@@ -3704,16 +3734,15 @@ application.get("/api/recommendations/:userId", async (request, response) => {
     }));
 
     const emptyMessage = candidateMentors.length === 0
-      ? `No qualified mentors are currently teaching your requested skills (${learnerDesiredSkills.map(s => s.skill_name).join(', ')}). You can submit a course request to attract mentors!`
+      ? `No verified mentors are currently teaching your requested skills (${learnerDesiredSkills.map(s => s.skill_name).join(', ')}). You can submit a course request to attract mentors!`
       : null;
 
     return response.status(200).json({
       recommendations: rankedRecommendations,
+      totalCount: rankedRecommendations.length,
       totalCandidatesEvaluated: candidateMentors.length,
       desiredSkills: learnerDesiredSkills.map(s => s.skill_name),
       message: emptyMessage,
-      scoringFormula: "Skill Match (0-40 pts) + Reputation Rating (0-40 pts) + Network Proximity (0-20 pts) = 100 max points (clamped 0-100)",
-      algorithm: "Max-Heap Priority Queue with Graph BFS Proximity",
     });
   } catch (error) {
     console.error("Error generating recommendations:", error);
