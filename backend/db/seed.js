@@ -390,48 +390,106 @@ const seedUsersData = [
 ];
 
 const seedSkillCatalog = [
-  // Technology & Computer Science
+  // Programming, Computer Science & Technology
   { name: "Python", category: "Programming & Software", description: "General-purpose programming language emphasizing code readability and broad ecosystem for web, backend, and data science." },
-  { name: "Node.js", category: "Programming & Software", description: "Asynchronous event-driven JavaScript runtime designed to build scalable network backends." },
-  { name: "Data Structures", category: "Programming & Software", description: "Essential data arrangements including arrays, lists, trees, graphs, heaps, and hash tables." },
-  { name: "Algorithms", category: "Programming & Software", description: "Algorithmic strategies including sorting, graph traversal, greedy methods, and dynamic programming." },
-  { name: "Software Engineering", category: "Programming & Software", description: "Software lifecycle practices, clean code, modular architecture, and automated testing." },
-  { name: "Docker", category: "Cloud & DevOps", description: "Container engine for packaging software applications with reproducible dependencies." },
+  { name: "JavaScript", category: "Programming & Software", description: "Core language of the web for interactive front-end interfaces, asynchronous programming, and modern ES6+ applications." },
+  { name: "TypeScript", category: "Programming & Software", description: "Strongly typed superset of JavaScript that scales enterprise codebases with static type checking and interfaces." },
+  { name: "React", category: "Programming & Software", description: "Component-based JavaScript library for building declarative, stateful user interfaces and single-page web applications." },
+  { name: "Node.js", category: "Programming & Software", description: "Asynchronous event-driven JavaScript runtime designed to build scalable network backends and REST APIs." },
+  { name: "Java", category: "Programming & Software", description: "Object-oriented programming language widely used for enterprise backend services, Android apps, and distributed systems." },
+  { name: "C++", category: "Programming & Software", description: "High-performance systems and object-oriented programming language for game engines, embedded software, and competitive programming." },
+  { name: "SQL & Databases", category: "Programming & Software", description: "Relational database schema design, normalization, indexing, ACID transactions, and complex SQL query optimization." },
+  { name: "Git & Version Control", category: "Programming & Software", description: "Distributed version control workflows, branching strategies, rebasing, conflict resolution, and collaborative code review." },
+  { name: "Data Structures", category: "Programming & Software", description: "Essential data arrangements including arrays, linked lists, trees, graphs, priority queues (heaps), and hash tables." },
+  { name: "Algorithms", category: "Programming & Software", description: "Algorithmic strategies including sorting, graph traversal (BFS/DFS), greedy methods, divide-and-conquer, and dynamic programming." },
+  { name: "Computer Science", category: "Programming & Software", description: "Core computing principles spanning computational complexity, automata, memory management, and system architecture." },
+  { name: "Operating Systems", category: "Programming & Software", description: "Process scheduling, concurrency, virtual memory paging, file systems, and kernel synchronization primitives." },
+  { name: "Computer Networks", category: "Programming & Software", description: "TCP/IP protocol suite, DNS, HTTP/HTTPS, routing algorithms, socket programming, and network security." },
+  { name: "System Design", category: "Programming & Software", description: "Scalable distributed architecture, load balancing, caching tiers, database sharding, and high-availability design." },
+  { name: "Cybersecurity", category: "Programming & Software", description: "Application security, cryptography fundamentals, authentication protocols, threat modeling, and defensive engineering." },
+  { name: "Software Engineering", category: "Programming & Software", description: "Software lifecycle practices, clean code, modular architecture, design patterns, and automated testing." },
+  { name: "Full-Stack Development", category: "Programming & Software", description: "End-to-end web application engineering combining responsive frontend views, REST/WebSocket APIs, and persistent databases." },
+  { name: "Mobile App Development", category: "Programming & Software", description: "Cross-platform and native mobile application architecture, responsive layouts, offline state, and device APIs." },
 
-  // Design & Frontend
+  // Cloud & DevOps
+  { name: "Docker", category: "Cloud & DevOps", description: "Container engine for packaging software applications with reproducible dependencies and multi-stage builds." },
+  { name: "Kubernetes", category: "Cloud & DevOps", description: "Container orchestration for automated deployment, service discovery, scaling, and cluster management." },
+  { name: "Cloud Computing", category: "Cloud & DevOps", description: "Cloud infrastructure architecture, serverless functions, managed storage, networking, and cost-efficient scaling." },
+  { name: "Linux Administration", category: "Cloud & DevOps", description: "Unix/Linux shell scripting, permissions, systemd services, process diagnostics, and server administration." },
+  { name: "CI/CD & Automation", category: "Cloud & DevOps", description: "Continuous integration and delivery pipelines, automated build verification, and deployment workflows." },
+
+  // UI/UX & Design
   { name: "Web Design", category: "UI/UX & Design", description: "Responsive layouts, semantic markup, visual hierarchy, and modern CSS techniques." },
-  { name: "UI Design", category: "UI/UX & Design", description: "Interface aesthetics, typography, accessibility contrast, and design system tokens." },
+  { name: "UI Design", category: "UI/UX & Design", description: "Interface aesthetics, typography, accessibility contrast, component states, and design system tokens." },
+  { name: "UX Research", category: "UI/UX & Design", description: "User interviews, usability testing, information architecture, journey mapping, and wireframing." },
+  { name: "Figma & Prototyping", category: "UI/UX & Design", description: "Collaborative interface design, auto-layout components, interactive prototypes, and design handoff." },
+  { name: "Graphic Design", category: "UI/UX & Design", description: "Visual communication, brand identity, layout composition, color theory, and vector illustration." },
 
-  // AI & Data Science
-  { name: "Machine Learning", category: "Data Science & AI", description: "Supervised and unsupervised statistical learning models, regression, and classification." },
+  // Machine Learning & Data Science
+  { name: "Machine Learning", category: "Data Science & AI", description: "Supervised and unsupervised statistical learning models, feature engineering, regression, and classification." },
   { name: "Deep Learning", category: "Data Science & AI", description: "Deep neural networks, activation functions, backpropagation, and CNN/transformer architectures." },
-  { name: "Excel", category: "Productivity & Analytics", description: "Spreadsheet modeling, analytical pivot tables, nested formulas, and data analysis." },
+  { name: "Data Science", category: "Data Science & AI", description: "Exploratory data analysis, data cleaning, statistical inference, and reproducible computational notebooks." },
+  { name: "Natural Language Processing", category: "Data Science & AI", description: "Text tokenization, embeddings, sequence modeling, sentiment analysis, and transformer language models." },
+  { name: "Computer Vision", category: "Data Science & AI", description: "Image processing, feature extraction, object detection, segmentation, and convolutional neural networks." },
+  { name: "Data Visualization", category: "Data Science & AI", description: "Communicating quantitative insights through clear charts, dashboards, and visual storytelling." },
 
-  // Mathematics
-  { name: "Linear Algebra", category: "Academics & Mathematics", description: "Vector spaces, linear maps, matrix rank, eigenvalues, eigenvectors, and singular value decomposition." },
-  { name: "Calculus", category: "Academics & Mathematics", description: "Differential and integral calculus, limits, derivatives, Taylor series, and optimization." },
-  { name: "Statistics", category: "Academics & Mathematics", description: "Probability, inferential statistics, confidence intervals, and hypothesis testing." },
+  // Productivity & Analytics
+  { name: "Excel", category: "Productivity & Analytics", description: "Spreadsheet modeling, analytical pivot tables, nested lookup formulas, and quantitative data analysis." },
+  { name: "Financial Modeling", category: "Productivity & Analytics", description: "Cash flow forecasting, valuation models, scenario sensitivity analysis, and structured spreadsheets." },
+  { name: "Project Management", category: "Productivity & Analytics", description: "Agile and Scrum ceremonies, milestone planning, stakeholder communication, and risk tracking." },
+  { name: "Business Analytics", category: "Productivity & Analytics", description: "KPI definition, funnel analysis, cohort retention metrics, and data-informed decision making." },
 
-  // Psychology & Social Sciences
-  { name: "Psychology", category: "Social Sciences & Psychology", description: "Scientific study of human mental processes, behavioral dynamics, and personality development." },
-  { name: "Cognitive Psychology", category: "Social Sciences & Psychology", description: "Human working memory, heuristics, perception, cognitive dissonance, and decision-making." },
-  { name: "Economics", category: "Social Sciences & Psychology", description: "Microeconomic pricing, macroeconomic policy, trade balances, and market equilibrium." },
-  { name: "Sociology", category: "Social Sciences & Psychology", description: "Social institutions, cultural stratification, interpersonal norms, and societal behavior." },
+  // Mathematics & Academics
+  { name: "Mathematics", category: "Academics & Mathematics", description: "Foundational and advanced mathematical reasoning, proofs, problem solving, and quantitative modeling." },
+  { name: "Linear Algebra", category: "Academics & Mathematics", description: "Vector spaces, linear transformations, matrix rank, eigenvalues, eigenvectors, and singular value decomposition." },
+  { name: "Calculus", category: "Academics & Mathematics", description: "Differential and integral calculus, limits, derivatives, multivariable functions, Taylor series, and optimization." },
+  { name: "Statistics", category: "Academics & Mathematics", description: "Probability distributions, inferential statistics, confidence intervals, Bayesian reasoning, and hypothesis testing." },
+  { name: "Probability & Statistics", category: "Academics & Mathematics", description: "Random variables, expectation, variance, conditional probability, and statistical estimation." },
+  { name: "Discrete Mathematics", category: "Academics & Mathematics", description: "Propositional logic, set theory, combinatorics, recurrence relations, and graph theory foundations." },
+  { name: "Differential Equations", category: "Academics & Mathematics", description: "Ordinary and partial differential equations, dynamical systems, Laplace transforms, and boundary value problems." },
+  { name: "Physics", category: "Academics & Mathematics", description: "Classical mechanics, electromagnetism, thermodynamics, waves, and quantitative physical modeling." },
+
+  // Social Sciences & Psychology
+  { name: "Psychology", category: "Social Sciences & Psychology", description: "Scientific study of human mental processes, behavioral dynamics, learning theories, and personality development." },
+  { name: "Cognitive Psychology", category: "Social Sciences & Psychology", description: "Human working memory, attention, heuristics, perception, cognitive dissonance, and decision-making." },
+  { name: "Behavioral Psychology", category: "Social Sciences & Psychology", description: "Conditioning principles, habit formation, behavioral economics, motivation, and reinforcement schedules." },
+  { name: "Social Sciences", category: "Social Sciences & Psychology", description: "Interdisciplinary analysis of human society, institutions, civic structures, and empirical social research." },
+  { name: "Sociology", category: "Social Sciences & Psychology", description: "Social institutions, cultural stratification, group dynamics, interpersonal norms, and societal change." },
+  { name: "Economics", category: "Social Sciences & Psychology", description: "Microeconomic pricing, macroeconomic policy, game theory, trade balances, and market equilibrium." },
+  { name: "Political Science", category: "Social Sciences & Psychology", description: "Comparative government, public policy analysis, international relations, and political theory." },
+  { name: "Anthropology", category: "Social Sciences & Psychology", description: "Cultural anthropology, ethnography, human evolution, and cross-cultural comparative studies." },
+  { name: "Research Methods", category: "Social Sciences & Psychology", description: "Experimental design, qualitative and quantitative methodology, survey construction, and research ethics." },
 
   // Sports & Athletics
-  { name: "Basketball", category: "Sports & Athletics", description: "Shooting mechanics, defensive zone discipline, pick-and-roll tactical execution, and footwork." },
-  { name: "Tennis", category: "Sports & Athletics", description: "Stroke biomechanics, Continental grip mechanics, topspin generation, and court strategy." },
-  { name: "Chess", category: "Sports & Athletics", description: "Positional piece play, tactical combinations, opening theory, and endgame pawn structures." },
+  { name: "Football", category: "Sports & Athletics", description: "Ball control, passing vision, tactical formations, set-piece execution, positional awareness, and match conditioning." },
+  { name: "Soccer", category: "Sports & Athletics", description: "First-touch control, dribbling footwork, pressing tactics, finishing mechanics, and team positional play." },
+  { name: "Basketball", category: "Sports & Athletics", description: "Shooting mechanics, defensive zone discipline, pick-and-roll tactical execution, ball handling, and footwork." },
+  { name: "Tennis", category: "Sports & Athletics", description: "Stroke biomechanics, grip mechanics, topspin generation, serve placement, and singles/doubles court strategy." },
+  { name: "Cricket", category: "Sports & Athletics", description: "Batting technique, bowling line and length, seam and spin variations, fielding agility, and match tactics." },
+  { name: "Badminton", category: "Sports & Athletics", description: "Split-step footwork, overhead clear and smash mechanics, net play finesse, and rally positioning." },
+  { name: "Swimming", category: "Sports & Athletics", description: "Freestyle, backstroke, breaststroke, and butterfly stroke efficiency, breathing rhythm, and flip turns." },
+  { name: "Volleyball", category: "Sports & Athletics", description: "Serving accuracy, forearm passing, overhead setting, approach spike timing, and rotational defense." },
+  { name: "Track & Field", category: "Sports & Athletics", description: "Sprint acceleration mechanics, middle-distance pacing, running form biomechanics, and plyometric conditioning." },
+  { name: "Table Tennis", category: "Sports & Athletics", description: "Spin recognition, forehand and backhand loop technique, service variations, and rapid footwork." },
+  { name: "Chess", category: "Sports & Athletics", description: "Positional piece play, tactical combinations, opening repertoire, calculation discipline, and endgame structures." },
 
-  // Arts & Creative
-  { name: "Photography", category: "Arts & Creative", description: "Aperture, shutter speed, ISO exposure triangle, natural lighting, and photographic composition." },
-  { name: "Guitar", category: "Arts & Creative", description: "Acoustic fingerstyle, chord transitions, fretboard harmony, rhythm, and acoustic technique." },
-  { name: "Cooking", category: "Arts & Creative", description: "Culinary chemistry, knife skills, food preparation, flavor balancing, and plant-based nutrition." },
+  // Photography, Arts & Creative
+  { name: "Photography", category: "Arts & Creative", description: "Aperture, shutter speed, ISO exposure triangle, natural and studio lighting, and photographic composition." },
+  { name: "Digital Photography", category: "Arts & Creative", description: "Mirrorless and DSLR camera operation, RAW workflow, lens selection, focal length, and dynamic range." },
+  { name: "Portrait Photography", category: "Arts & Creative", description: "Subject posing, flattering lighting ratios, depth of field, environmental portraits, and color grading." },
+  { name: "Photo Editing & Lightroom", category: "Arts & Creative", description: "Non-destructive RAW development, tone curves, color calibration, masking, and retouching workflows." },
+  { name: "Video Editing", category: "Arts & Creative", description: "Timeline pacing, multi-cam cutting, audio mixing, color correction, and narrative video production." },
+  { name: "Guitar", category: "Arts & Creative", description: "Acoustic fingerstyle, chord transitions, fretboard harmony, rhythm strumming, and musical expression." },
+  { name: "Piano", category: "Arts & Creative", description: "Keyboard posture, sight reading, chord voicings, scales, pedaling technique, and repertoire interpretation." },
+  { name: "Music Theory", category: "Arts & Creative", description: "Scales, intervals, diatonic harmony, chord progressions, voice leading, and rhythmic meter." },
+  { name: "Cooking", category: "Arts & Creative", description: "Culinary chemistry, knife skills, heat control, flavor balancing, and nutritious meal preparation." },
 
   // Languages & Communication
-  { name: "Spanish", category: "Languages & Communication", description: "Grammar, conjugation, vocabulary, and conversational fluency in Spanish." },
-  { name: "Public Speaking", category: "Languages & Communication", description: "Rhetorical structure, vocal projection, stage presence, and engaging presentation delivery." },
-  { name: "Public Relations", category: "Languages & Communication", description: "Strategic communication process that builds mutually beneficial relationships between organizations and their publics." },
+  { name: "Spanish", category: "Languages & Communication", description: "Grammar, verb conjugation, everyday vocabulary, listening comprehension, and conversational fluency in Spanish." },
+  { name: "French", category: "Languages & Communication", description: "Pronunciation, conversational French grammar, reading comprehension, and idiomatic expression." },
+  { name: "Public Speaking", category: "Languages & Communication", description: "Rhetorical structure, vocal projection, stage presence, storytelling, and persuasive presentation delivery." },
+  { name: "Public Relations", category: "Languages & Communication", description: "Strategic communication, media outreach, crisis messaging, and stakeholder engagement." },
+  { name: "Academic Writing", category: "Languages & Communication", description: "Thesis formulation, literature synthesis, citation standards, clarity, and structured argumentative essays." },
 ];
 
 /**
@@ -457,6 +515,42 @@ async function seedPostgres(closePool = false) {
           OR email LIKE 'mode_test_%@example.com'`
     );
 
+    // 0b. Ensure every user account can switch freely between Learner and Teacher modes
+    await pool.query(
+      `UPDATE users
+       SET can_teach = TRUE,
+           can_learn = TRUE,
+           active_mode = CASE WHEN active_mode IN ('learner', 'teacher') THEN active_mode ELSE 'learner' END
+       WHERE can_teach IS DISTINCT FROM TRUE
+          OR can_learn IS DISTINCT FROM TRUE
+          OR active_mode IS NULL
+          OR active_mode NOT IN ('learner', 'teacher')`
+    );
+
+    // 0c. Clean up obsolete quiz, demo/test, and duplicate notifications while preserving genuine notifications
+    await pool.query(
+      `DELETE FROM notifications
+       WHERE LOWER(COALESCE(type, '')) LIKE '%quiz%'
+          OR LOWER(COALESCE(title, '')) LIKE '%quiz%'
+          OR LOWER(COALESCE(message, '')) LIKE '%quiz%'
+          OR LOWER(COALESCE(link, '')) LIKE '%quiz%'
+          OR user_id LIKE 'test_%'
+          OR user_id LIKE 'mode_test_%'
+          OR LOWER(COALESCE(title, '')) LIKE '%test workflow%'
+          OR LOWER(COALESCE(message, '')) LIKE '%test workflow%'
+          OR LOWER(COALESCE(title, '')) LIKE '%demo notification%'
+          OR LOWER(COALESCE(title, '')) LIKE '%sample notification%'`
+    );
+    await pool.query(
+      `DELETE FROM notifications n
+       USING notifications n2
+       WHERE n.user_id = n2.user_id
+         AND COALESCE(n.type, '') = COALESCE(n2.type, '')
+         AND LOWER(TRIM(COALESCE(n.title, ''))) = LOWER(TRIM(COALESCE(n2.title, '')))
+         AND LOWER(TRIM(COALESCE(n.message, ''))) = LOWER(TRIM(COALESCE(n2.message, '')))
+         AND n.id < n2.id`
+    );
+
     // 1. Seed canonical skill catalog
     for (const sc of seedSkillCatalog) {
       await pool.query(
@@ -479,9 +573,9 @@ async function seedPostgres(closePool = false) {
       await pool.query(
         `INSERT INTO users (
            id, name, email, password_hash, role, bio, profile_summary, specialization_domain,
-           work_experience, social_profiles, reputation_score, username, is_demo
+           work_experience, social_profiles, reputation_score, username, is_demo, can_teach, can_learn
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, TRUE)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, TRUE, TRUE, TRUE)
          ON CONFLICT (id) DO UPDATE SET
            name = EXCLUDED.name,
            bio = EXCLUDED.bio,
@@ -491,6 +585,8 @@ async function seedPostgres(closePool = false) {
            work_experience = EXCLUDED.work_experience,
            social_profiles = EXCLUDED.social_profiles,
            reputation_score = EXCLUDED.reputation_score,
+           can_teach = TRUE,
+           can_learn = TRUE,
            is_demo = TRUE`,
         [
           u.userId,
@@ -519,7 +615,7 @@ async function seedPostgres(closePool = false) {
         [u.userId, u.headline, u.hourlyRate]
       );
 
-      // 3. Insert skills and genuine quiz_attempts for verified demo skills
+      // 3. Insert skills for demo profiles
       for (const s of u.skills) {
         const isVerified = Boolean(s.verified);
 
@@ -539,27 +635,10 @@ async function seedPostgres(closePool = false) {
             isVerified ? new Date().toISOString() : null,
           ]
         );
-
-        // If marked verified, ensure a genuine passing quiz attempt exists in the database
-        if (isVerified) {
-          const score = s.score || 10;
-          const percentage = (score / 10) * 100;
-          const existingAttempt = await pool.query(
-            `SELECT id FROM quiz_attempts WHERE user_id = $1 AND LOWER(skill_name) = LOWER($2) AND passed = TRUE`,
-            [u.userId, s.skillName]
-          );
-          if (existingAttempt.rows.length === 0) {
-            await pool.query(
-              `INSERT INTO quiz_attempts (user_id, skill_name, score, total, percentage, passed, created_at)
-               VALUES ($1, $2, $3, 10, $4, TRUE, CURRENT_TIMESTAMP)`,
-              [u.userId, s.skillName, score, percentage]
-            );
-          }
-        }
       }
     }
 
-    console.log(`[Seed] Successfully synchronized ${seedUsersData.length} catalog demo mentors across all required domains!`);
+    console.log(`[Seed] Successfully synchronized ${seedUsersData.length} catalog demo mentors and ${seedSkillCatalog.length} catalog skills across all required domains!`);
     return true;
   } catch (err) {
     console.error("[Seed Error]", err);
@@ -577,4 +656,4 @@ if (require.main === module) {
     .catch(() => process.exit(1));
 }
 
-module.exports = { seedPostgres, seedUsersData };
+module.exports = { seedPostgres, seedUsersData, seedSkillCatalog };

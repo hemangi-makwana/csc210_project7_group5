@@ -67,6 +67,7 @@ const reputationEngine = new ReputationEngine(31, 4.0, 3);
 
 const { pool, query, checkConnection, isPoolInitialized } = require("./db/index");
 const { setupDatabase } = require("./db/setup");
+const { seedSkillCatalog } = require("./db/seed");
 // JWT signing secret — loaded strictly from backend/.env, never hardcoded.
 // The backend requires JWT_SECRET and fails safely on startup if missing.
 const JWT_SECRET = process.env.JWT_SECRET || (process.env.NODE_ENV === "test" ? require("crypto").randomBytes(32).toString("hex") : null);
@@ -296,12 +297,14 @@ async function authenticateToken(request, response, next) {
       if (uRes.rows && uRes.rows[0]) {
         request.user.is_reviewer = Boolean(uRes.rows[0].is_reviewer);
         request.user.isReviewer = Boolean(uRes.rows[0].is_reviewer);
-        request.user.canTeach = Boolean(uRes.rows[0].can_teach);
-        request.user.canLearn = Boolean(uRes.rows[0].can_learn);
-        request.user.activeMode = uRes.rows[0].active_mode;
+        request.user.canTeach = true;
+        request.user.canLearn = true;
+        request.user.activeMode = uRes.rows[0].active_mode || "learner";
       } else {
         request.user.is_reviewer = false;
         request.user.isReviewer = false;
+        request.user.canTeach = true;
+        request.user.canLearn = true;
       }
     } catch (dbErr) {
       request.user.is_reviewer = false;
@@ -357,10 +360,21 @@ async function validateSkillAgainstCatalog(skillName) {
     return { valid: false, error: "Skill name cannot be empty." };
   }
 
-  const catalogRes = await query(
-    `SELECT id, name, category, description FROM skill_catalog ORDER BY name ASC`
-  );
-  const catalog = catalogRes.rows || [];
+  await ensureCuratedCatalogSynced();
+
+  let catalog = [];
+  try {
+    const catalogRes = await query(
+      `SELECT id, name, category, description FROM skill_catalog ORDER BY name ASC`
+    );
+    catalog = catalogRes.rows || [];
+  } catch (err) {
+    catalog = Array.isArray(seedSkillCatalog) ? seedSkillCatalog : [];
+  }
+
+  if (catalog.length === 0 && Array.isArray(seedSkillCatalog)) {
+    catalog = seedSkillCatalog;
+  }
 
   // Check exact case-insensitive match
   const exact = catalog.find((c) => c.name.toLowerCase() === clean.toLowerCase());
@@ -375,7 +389,7 @@ async function validateSkillAgainstCatalog(skillName) {
   for (const item of catalog) {
     const itemName = item.name;
     const dist = computeLevenshteinDistance(clean.toLowerCase(), itemName.toLowerCase());
-    const maxThreshold = Math.max(2, Math.floor(itemName.length * 0.35));
+    const maxThreshold = clean.length >= 8 ? 3 : 2;
     if (dist <= maxThreshold && dist < minDistance) {
       minDistance = dist;
       closest = item;
@@ -387,14 +401,17 @@ async function validateSkillAgainstCatalog(skillName) {
       valid: false,
       canonicalName: null,
       suggestion: closest.name,
-      message: `"${clean}" was not found in the course catalog. Did you mean "${closest.name}"?`,
+      suggestionCategory: closest.category || null,
+      distance: minDistance,
+      message: `"${clean}" is close to "${closest.name}" in the catalog. Did you mean "${closest.name}", or would you like to request "${clean}" as a new skill?`,
     };
   }
 
   return {
     valid: false,
     canonicalName: null,
-    message: `"${clean}" does not exist in the course catalog. Please choose a valid skill from the catalog.`,
+    suggestion: null,
+    message: `"${clean}" is not yet in the curated catalog. You can submit it as a pending new skill request.`,
   };
 }
 
@@ -843,6 +860,36 @@ async function initializeDatabaseAndDsa() {
       // Ensure schema tables exist (safe and idempotent)
       await setupDatabase(false);
 
+      // Idempotently synchronize expanded canonical skill catalog across all domains
+      if (Array.isArray(seedSkillCatalog) && seedSkillCatalog.length > 0) {
+        for (const sc of seedSkillCatalog) {
+          await query(
+            `INSERT INTO skill_catalog (name, category, description)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (name) DO UPDATE SET
+               category = EXCLUDED.category,
+               description = EXCLUDED.description`,
+            [sc.name, sc.category, sc.description]
+          ).catch(() => {});
+        }
+      }
+
+      // Ensure every existing account (demo and personal) can switch freely between Learner and Teacher modes
+      await query(
+        `UPDATE users
+         SET can_teach = TRUE,
+             can_learn = TRUE,
+             active_mode = CASE WHEN active_mode IN ('learner', 'teacher') THEN active_mode ELSE 'learner' END
+         WHERE can_teach IS DISTINCT FROM TRUE
+            OR can_learn IS DISTINCT FROM TRUE
+            OR active_mode IS NULL
+            OR active_mode NOT IN ('learner', 'teacher')`
+      ).catch(() => {});
+
+      // Clean up obsolete quiz, demo/test, and duplicate notifications while preserving genuine notifications
+      await cleanupObsoleteNotifications().catch(() => {});
+      await cleanupAutomatedBookingChatMessages().catch(() => {});
+
       // Query mentors and skills directly from PostgreSQL to populate Hash Table & Graph
       const result = await query(`
         SELECT u.id, u.name, u.role, u.bio, u.reputation_score,
@@ -982,6 +1029,93 @@ if (isPoolInitialized()) {
 // ----------------------------------------------------------------------------
 // HELPER FUNCTIONS
 // ----------------------------------------------------------------------------
+
+/**
+ * Cleans up obsolete quiz notifications, demo/test artifacts, and exact duplicate
+ * notifications in PostgreSQL while preserving all genuine user and session notifications.
+ */
+async function cleanupObsoleteNotifications() {
+  try {
+    // 1. Remove retired quiz notifications and automated test/demo placeholder notifications
+    await query(
+      `DELETE FROM notifications
+       WHERE LOWER(COALESCE(type, '')) LIKE '%quiz%'
+          OR LOWER(COALESCE(title, '')) LIKE '%quiz%'
+          OR LOWER(COALESCE(message, '')) LIKE '%quiz%'
+          OR LOWER(COALESCE(link, '')) LIKE '%quiz%'
+          OR user_id LIKE 'test_%'
+          OR user_id LIKE 'mode_test_%'
+          OR LOWER(COALESCE(title, '')) LIKE '%test workflow%'
+          OR LOWER(COALESCE(message, '')) LIKE '%test workflow%'
+          OR LOWER(COALESCE(title, '')) LIKE '%demo notification%'
+          OR LOWER(COALESCE(title, '')) LIKE '%sample notification%'`
+    );
+
+    // 2. Deduplicate identical notifications for the same user (keeping the newest record)
+    await query(
+      `DELETE FROM notifications n
+       USING notifications n2
+       WHERE n.user_id = n2.user_id
+         AND COALESCE(n.type, '') = COALESCE(n2.type, '')
+         AND LOWER(TRIM(COALESCE(n.title, ''))) = LOWER(TRIM(COALESCE(n2.title, '')))
+         AND LOWER(TRIM(COALESCE(n.message, ''))) = LOWER(TRIM(COALESCE(n2.message, '')))
+         AND n.id < n2.id`
+    );
+
+    // 3. Route teacher incoming-booking notifications directly to Incoming Learner Requests (/requests)
+    await query(
+      `UPDATE notifications
+       SET link = '/requests'
+       WHERE type = 'booking_received' AND link = '/history?view=teaching'`
+    );
+  } catch (err) {
+    // Non-fatal if DB unreachable
+  }
+}
+
+/**
+ * Safely removes only system-generated automated booking-request, acceptance, and decline
+ * chat messages from conversations while preserving all participant messages, attachments,
+ * voice notes, and call activity logs.
+ */
+async function cleanupAutomatedBookingChatMessages() {
+  try {
+    await query(
+      `DELETE FROM messages
+       WHERE COALESCE(message_type, 'text') = 'text'
+         AND attachment_filename IS NULL
+         AND (
+           content LIKE 'Session booking request submitted for "%'
+           OR content LIKE 'Session accepted! Looking forward to our session on "%'
+           OR content LIKE 'Session request was declined: "%'
+         )`
+    );
+  } catch (err) {
+    // Non-fatal if DB unreachable
+  }
+}
+
+let catalogSyncedInProcess = false;
+async function ensureCuratedCatalogSynced() {
+  if (catalogSyncedInProcess) return;
+  try {
+    if (Array.isArray(seedSkillCatalog) && seedSkillCatalog.length > 0) {
+      for (const sc of seedSkillCatalog) {
+        await query(
+          `INSERT INTO skill_catalog (name, category, description)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (name) DO UPDATE SET
+             category = EXCLUDED.category,
+             description = EXCLUDED.description`,
+          [sc.name, sc.category, sc.description]
+        );
+      }
+      catalogSyncedInProcess = true;
+    }
+  } catch (err) {
+    // Non-fatal
+  }
+}
 
 /**
  * Reconciles the in-memory FIFO bookingQueue with pending/queued session_bookings in PostgreSQL.
@@ -1220,6 +1354,8 @@ application.get("/api/skills/catalog", async (request, response) => {
       });
     }
 
+    await ensureCuratedCatalogSynced();
+
     const catRes = await query(
       `SELECT id, name, category, description, created_at
        FROM skill_catalog
@@ -1241,13 +1377,13 @@ application.get("/api/skills/catalog", async (request, response) => {
 });
 
 /**
- * ENDPOINT 1: GET /api/skills/search?query=<skillName>
+ * ENDPOINT 1: GET /api/skills/search?query=<mentorNameOrSkill>
  *
  * WHAT IT DOES:
- * 1. Reads search query parameter (e.g. ?query=Python).
- * 2. Uses our Hash Table's lookup() method to quickly find mentors in O(1) average time.
- *    (All entries in the Hash Table are primed from / synced with PostgreSQL).
- * 3. Sorts matching mentors by proficiency level (expert first).
+ * 1. Reads search query parameter (e.g. ?query=Alice or ?query=Python).
+ * 2. Matches mentor names and teachable skills case-insensitively by substring from PostgreSQL
+ *    (and consults our Hash Table index for O(1) skill key lookup).
+ * 3. Ranks exact mentor name matches first, then partial mentor name matches, then skill matches.
  * 4. Returns { mentors: [...] }.
  */
 application.get("/api/skills/search", async (request, response) => {
@@ -1283,7 +1419,7 @@ application.get("/api/skills/search", async (request, response) => {
            JOIN skills s ON u.id = s.user_id
            WHERE s.type = 'teach'
            GROUP BY u.id, u.name, u.role, u.bio, u.profile_summary, u.reputation_score, u.is_demo, u.avatar_url
-           ORDER BY BOOL_OR(COALESCE(s.is_verified, FALSE)) DESC, u.reputation_score DESC`
+           ORDER BY BOOL_OR(COALESCE(s.is_verified, FALSE)) DESC, u.reputation_score DESC, u.name ASC`
         );
 
         const mentors = (allResult.rows || []).map((row) => {
@@ -1307,6 +1443,10 @@ application.get("/api/skills/search", async (request, response) => {
         });
       }
 
+      const lowerExact = cleanQuery.toLowerCase();
+      const lowerPrefix = `${lowerExact}%`;
+      const lowerSubstr = `%${lowerExact}%`;
+
       const dbResult = await query(
         `SELECT u.id, u.id as "userId", u.name, u.role, u.bio, u.profile_summary,
                 u.reputation_score as "reputationScore", u.reputation_score, u.is_demo, u.avatar_url,
@@ -1323,19 +1463,43 @@ application.get("/api/skills/search", async (request, response) => {
                   ) FILTER (WHERE s.type = 'teach'),
                   '[]'::jsonb
                 ) as skill_entries,
-                BOOL_OR(CASE WHEN LOWER(s.skill_name) LIKE LOWER($1) AND COALESCE(s.is_verified, FALSE) = TRUE THEN TRUE ELSE FALSE END) as is_verified
+                BOOL_OR(
+                  CASE
+                    WHEN LOWER(s.skill_name) LIKE $1 AND COALESCE(s.is_verified, FALSE) = TRUE THEN TRUE
+                    WHEN LOWER(u.name) LIKE $1 AND COALESCE(s.is_verified, FALSE) = TRUE THEN TRUE
+                    ELSE FALSE
+                  END
+                ) as is_verified,
+                CASE
+                  WHEN LOWER(TRIM(u.name)) = $2 THEN 1
+                  WHEN LOWER(TRIM(u.name)) LIKE $3 THEN 2
+                  WHEN LOWER(u.name) LIKE $1 THEN 3
+                  WHEN BOOL_OR(LOWER(TRIM(s.skill_name)) = $2) THEN 4
+                  ELSE 5
+                END as match_rank
          FROM users u
          JOIN skills s ON u.id = s.user_id
          WHERE s.type = 'teach'
          GROUP BY u.id, u.name, u.role, u.bio, u.profile_summary, u.reputation_score, u.is_demo, u.avatar_url
-         HAVING BOOL_OR(LOWER(s.skill_name) LIKE LOWER($1))
-         ORDER BY MAX(CASE WHEN LOWER(s.skill_name) LIKE LOWER($1) AND COALESCE(s.is_verified, FALSE) = TRUE THEN 1 ELSE 0 END) DESC, u.reputation_score DESC`,
-        [`%${cleanQuery}%`]
+         HAVING LOWER(u.name) LIKE $1 OR BOOL_OR(LOWER(s.skill_name) LIKE $1)
+         ORDER BY
+           CASE
+             WHEN LOWER(TRIM(u.name)) = $2 THEN 1
+             WHEN LOWER(TRIM(u.name)) LIKE $3 THEN 2
+             WHEN LOWER(u.name) LIKE $1 THEN 3
+             WHEN BOOL_OR(LOWER(TRIM(s.skill_name)) = $2) THEN 4
+             ELSE 5
+           END ASC,
+           MAX(CASE WHEN (LOWER(s.skill_name) LIKE $1 OR LOWER(u.name) LIKE $1) AND COALESCE(s.is_verified, FALSE) = TRUE THEN 1 ELSE 0 END) DESC,
+           u.reputation_score DESC,
+           u.name ASC`,
+        [lowerSubstr, lowerExact, lowerPrefix]
       );
 
       let suggestion = null;
       let message = null;
       if (!dbResult.rows || dbResult.rows.length === 0) {
+        await ensureCuratedCatalogSynced();
         const validation = await validateSkillAgainstCatalog(cleanQuery);
         if (validation.valid) {
           message = `"${validation.canonicalName}" is a valid catalog course, but no mentors currently teach this skill.`;
@@ -1343,7 +1507,7 @@ application.get("/api/skills/search", async (request, response) => {
           suggestion = validation.suggestion;
           message = validation.message;
         } else {
-          message = validation.message;
+          message = `No mentors or skills matched "${cleanQuery}". You can request this skill on the Course & Skill Requests page.`;
         }
       }
 
@@ -1375,14 +1539,53 @@ application.get("/api/skills/search", async (request, response) => {
       return response.status(200).json({ mentors: [] });
     }
 
-    // Step 1: Use Hash Table fallback to find mentors who have this skill in O(1) average time
-    const matchingMentors = hashTableMatches;
+    // Fallback when DB is offline: match both mentor names and skills with exact name > partial name > skill ranking
+    const lowerQ = cleanQuery.toLowerCase();
+    const seenFallbackIds = new Set();
+    const fallbackCandidates = [];
 
-    // Step 2: Sort mentors by expertise level (expert > intermediate > beginner)
-    const sortedMentors = sortMentorsByLevel(matchingMentors);
+    for (const u of seedUsers) {
+      const nameLower = (u.name || "").trim().toLowerCase();
+      const hasNameMatch = nameLower.includes(lowerQ);
+      const hasSkillMatch = (u.skills || []).some((sk) => String(sk).toLowerCase().includes(lowerQ));
+      if (!hasNameMatch && !hasSkillMatch) continue;
+      if (seenFallbackIds.has(u.userId)) continue;
+      seenFallbackIds.add(u.userId);
+
+      let matchRank = 5;
+      if (nameLower === lowerQ) matchRank = 1;
+      else if (nameLower.startsWith(lowerQ)) matchRank = 2;
+      else if (hasNameMatch) matchRank = 3;
+      else if ((u.skills || []).some((sk) => String(sk).toLowerCase() === lowerQ)) matchRank = 4;
+
+      fallbackCandidates.push({
+        userId: u.userId,
+        id: u.userId,
+        name: u.name,
+        role: u.role,
+        bio: u.bio,
+        skills: u.skills,
+        level: (u.skillEntries && u.skillEntries[0] && u.skillEntries[0].level) || "intermediate",
+        reputationScore: u.reputationScore,
+        matchRank,
+      });
+    }
+
+    for (const m of hashTableMatches || []) {
+      const mId = String(m.userId || m.id);
+      if (!seenFallbackIds.has(mId)) {
+        seenFallbackIds.add(mId);
+        fallbackCandidates.push({ ...m, matchRank: 4 });
+      }
+    }
+
+    fallbackCandidates.sort((a, b) => {
+      if (a.matchRank !== b.matchRank) return a.matchRank - b.matchRank;
+      return (b.reputationScore || 0) - (a.reputationScore || 0);
+    });
 
     return response.status(200).json({
-      mentors: sortedMentors,
+      mentors: fallbackCandidates,
       source: "hash_table",
     });
   } catch (error) {
@@ -1532,7 +1735,7 @@ application.post("/api/sessions/book", async (request, response) => {
         "booking_received",
         "New Mentorship Booking Request",
         `New pending session request for "${bookingRequest.topic}".`,
-        "/history?view=teaching",
+        "/requests",
       ]
     ).catch(() => {});
 
@@ -1746,7 +1949,10 @@ application.post("/api/sessions/:id/cancel", authenticateToken, async (request, 
     );
 
     if (session.conversation_id) {
-      await query("UPDATE conversations SET status = 'closed' WHERE id = $1", [session.conversation_id]);
+      await query(
+        "UPDATE conversations SET is_closed = TRUE, closed_at = CURRENT_TIMESTAMP WHERE id = $1",
+        [session.conversation_id]
+      ).catch(() => {});
     }
 
     await reconcileBookingQueueFromDatabase();
@@ -1866,12 +2072,18 @@ application.get("/api/users/all", async (request, response) => {
           const effectiveRep = repSummary.reviewCount > 0
             ? repSummary.boundedReputation
             : Math.min(5.0, Math.max(1.0, !isNaN(dbRep) ? dbRep : 4.0));
+          const allSkillEntries = row.skill_entries && row.skill_entries.length > 0 ? row.skill_entries : [];
+          const verifiedSkillEntries = allSkillEntries.filter(
+            (s) => s && (s.type === "teach" || !s.type) && s.is_verified === true
+          );
           return {
             id: row.id,
             userId: row.id,
             name: row.name,
             role: row.role || "Peer Mentor",
-            skills: row.skill_entries && row.skill_entries.length > 0 ? row.skill_entries : (row.skills || []),
+            skills: allSkillEntries.length > 0 ? allSkillEntries : (row.skills || []),
+            verified_skills: verifiedSkillEntries,
+            verifiedSkills: verifiedSkillEntries,
             bio: row.bio || row.profile_summary || "",
             profile_summary: row.profile_summary || row.bio || "",
             specialization_domain: row.specialization_domain || null,
@@ -2322,15 +2534,11 @@ application.put("/api/users/:userId/profile", authenticateToken, async (request,
       updateValues.push(cleanMode);
     }
 
-    if (can_teach !== undefined) {
-      updateClauses.push(`can_teach = $${paramIndex++}`);
-      updateValues.push(Boolean(can_teach));
-    }
-
-    if (can_learn !== undefined) {
-      updateClauses.push(`can_learn = $${paramIndex++}`);
-      updateValues.push(Boolean(can_learn));
-    }
+    // Ensure every account can freely switch between Learner and Teacher modes
+    updateClauses.push(`can_teach = $${paramIndex++}`);
+    updateValues.push(can_teach !== undefined ? (Boolean(can_teach) || true) : true);
+    updateClauses.push(`can_learn = $${paramIndex++}`);
+    updateValues.push(can_learn !== undefined ? (Boolean(can_learn) || true) : true);
 
     if (updateClauses.length === 0) {
       return response.status(400).json({ error: "No valid profile fields provided for update." });
@@ -2367,8 +2575,8 @@ application.put("/api/users/:userId/profile", authenticateToken, async (request,
         avatar_url: updated.avatar_url || null,
         reputation_score: parseFloat(updated.reputation_score) || 5.0,
         active_mode: updated.active_mode || "learner",
-        can_teach: updated.can_teach !== false,
-        can_learn: updated.can_learn !== false,
+        can_teach: true,
+        can_learn: true,
         skills: skillsRes.rows || [],
         updated_at: updated.updated_at,
       },
@@ -2381,6 +2589,45 @@ application.put("/api/users/:userId/profile", authenticateToken, async (request,
     });
   }
 });
+
+/**
+ * ENDPOINT 4B-MODE: PATCH / PUT /api/users/:userId/mode
+ * Allows any authenticated account (demo or personal) to switch freely between Learner and Teacher modes.
+ */
+const updateUserModeHandler = async (request, response) => {
+  try {
+    const targetUserId = request.params.userId;
+    if (request.user.userId !== targetUserId) {
+      return response.status(403).json({
+        error: "Forbidden: You can only switch mode for your own account.",
+      });
+    }
+
+    const rawMode = request.body.active_mode || request.body.mode;
+    const cleanMode = String(rawMode || "").toLowerCase() === "teacher" ? "teacher" : "learner";
+
+    const conn = await checkConnection();
+    if (conn.reachable) {
+      await query(
+        `UPDATE users
+         SET active_mode = $1, can_teach = TRUE, can_learn = TRUE, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2`,
+        [cleanMode, targetUserId]
+      );
+    }
+
+    return response.status(200).json({
+      success: true,
+      active_mode: cleanMode,
+      can_teach: true,
+      can_learn: true,
+    });
+  } catch (error) {
+    return response.status(500).json({ error: error.message });
+  }
+};
+application.patch("/api/users/:userId/mode", authenticateToken, updateUserModeHandler);
+application.put("/api/users/:userId/mode", authenticateToken, updateUserModeHandler);
 
 /**
  * ENDPOINT 4B: POST /api/users/:userId/avatar
@@ -3203,8 +3450,18 @@ application.post("/api/course-requests", authenticateToken, async (request, resp
       });
     }
 
-    const cleanTitle = title.trim();
+    const cleanTitle = title.trim().replace(/\s+/g, " ");
+    if (cleanTitle.length > 120 || !/[a-zA-Z]/.test(cleanTitle)) {
+      return response.status(400).json({
+        error: "Please enter a valid skill or course title containing letters (2–120 characters).",
+      });
+    }
+
     const cleanDesc = description && typeof description === "string" ? description.trim() : "";
+    const requestedCategory =
+      category && typeof category === "string" && category.trim() !== ""
+        ? category.trim()
+        : "General";
 
     const conn = await checkConnection();
     if (!conn.reachable) {
@@ -3213,43 +3470,46 @@ application.post("/api/course-requests", authenticateToken, async (request, resp
       });
     }
 
-    // Validate title against canonical PostgreSQL skill_catalog
-    const validation = await validateSkillAgainstCatalog(cleanTitle);
-    if (!validation.valid) {
-      return response.status(400).json({
-        error: validation.message,
-        suggestion: validation.suggestion || null,
-        invalidSkill: cleanTitle,
-      });
-    }
+    await ensureCuratedCatalogSynced();
 
-    const canonicalTitle = validation.canonicalName;
-    const canonicalCategory = validation.category || (category && typeof category === "string" ? category.trim() : "General");
+    // Check against canonical skill_catalog for canonical casing/category or close spelling suggestions,
+    // WITHOUT rejecting legitimate unavailable skills that are not yet in skill_catalog
+    // and WITHOUT inserting unapproved skills into skill_catalog.
+    const validation = await validateSkillAgainstCatalog(cleanTitle);
+    const finalTitle = validation.valid ? validation.canonicalName : cleanTitle;
+    const finalCategory =
+      validation.valid && validation.category && requestedCategory === "General"
+        ? validation.category
+        : requestedCategory;
 
     // Check if the learner already has an active open request for this skill
     const duplicateRequest = await query(
       `SELECT id FROM course_requests
-       WHERE requester_id = $1 AND LOWER(title) = LOWER($2) AND status = 'open'`,
-      [requesterId, canonicalTitle]
+       WHERE requester_id = $1 AND LOWER(TRIM(title)) = LOWER(TRIM($2)) AND status = 'open'`,
+      [requesterId, finalTitle]
     );
 
     if (duplicateRequest.rows.length > 0) {
       return response.status(409).json({
-        error: `You already have an open course request for "${canonicalTitle}".`,
+        error: `You already have an open course request for "${finalTitle}".`,
       });
     }
 
-    // Insert new course request
+    // Insert new pending ('open') course request into course_requests (never mutates skill_catalog)
     const insertRes = await query(
       `INSERT INTO course_requests (requester_id, title, description, category, status, votes_count)
        VALUES ($1, $2, $3, $4, 'open', 1)
        RETURNING id, requester_id, title, description, category, status, votes_count, created_at, updated_at`,
-      [requesterId, canonicalTitle, cleanDesc, canonicalCategory]
+      [requesterId, finalTitle, cleanDesc, finalCategory]
     );
 
     return response.status(201).json({
-      message: `Course request for "${canonicalTitle}" created successfully. You will be notified as soon as an eligible teacher responds.`,
+      message: validation.valid
+        ? `Course request for "${finalTitle}" created successfully. You will be notified as soon as an eligible teacher responds.`
+        : `New skill request for "${finalTitle}" saved as a pending course request. You will be notified when a verified teacher offers this skill.`,
       courseRequest: insertRes.rows[0],
+      isCatalogSkill: Boolean(validation.valid),
+      suggestion: !validation.valid ? validation.suggestion || null : null,
     });
   } catch (error) {
     console.error("Error creating course request:", error);
@@ -3282,6 +3542,7 @@ application.get("/api/course-requests/my", authenticateToken, async (request, re
 
     return response.status(200).json({
       courseRequests: res.rows || [],
+      requests: res.rows || [],
     });
   } catch (error) {
     console.error("Error fetching user's course requests:", error);
@@ -3320,6 +3581,7 @@ application.get("/api/users/:userId/course-requests", authenticateToken, async (
 
     return response.status(200).json({
       courseRequests: res.rows || [],
+      requests: res.rows || [],
     });
   } catch (error) {
     console.error("Error fetching user course requests:", error);
@@ -3354,6 +3616,7 @@ application.get("/api/course-requests", async (request, response) => {
 
     return response.status(200).json({
       courseRequests: res.rows || [],
+      requests: res.rows || [],
     });
   } catch (error) {
     console.error("Error fetching course requests:", error);
@@ -3514,6 +3777,8 @@ application.get("/api/notifications", authenticateToken, async (request, respons
       return response.status(503).json({ error: "Database unavailable." });
     }
 
+    await cleanupObsoleteNotifications();
+
     const notifRes = await query(
       `SELECT id, user_id, type, title, message, is_read, link, created_at
        FROM notifications
@@ -3559,6 +3824,8 @@ application.get("/api/users/:userId/notifications", authenticateToken, async (re
     if (!conn.reachable) {
       return response.status(503).json({ error: "Database unavailable." });
     }
+
+    await cleanupObsoleteNotifications();
 
     const notifRes = await query(
       `SELECT id, user_id, type, title, message, is_read, link, created_at
@@ -6198,6 +6465,14 @@ application.post("/api/auth/login", async (request, response) => {
       });
     }
 
+    // Ensure existing account has both learner and teacher capabilities enabled
+    if (dbUser.can_teach !== true || dbUser.can_learn !== true) {
+      await query(
+        `UPDATE users SET can_teach = TRUE, can_learn = TRUE WHERE id = $1`,
+        [dbUser.id]
+      ).catch(() => {});
+    }
+
     // Build safe user object — password_hash is intentionally excluded from response
     const safeUser = {
       id: dbUser.id,
@@ -6212,9 +6487,9 @@ application.post("/api/auth/login", async (request, response) => {
       social_profiles: dbUser.social_profiles || {},
       avatar_url: dbUser.avatar_url || null,
       reputation_score: parseFloat(dbUser.reputation_score) || 5.0,
-      active_mode: dbUser.active_mode || "learner",
-      can_teach: dbUser.can_teach !== false,
-      can_learn: dbUser.can_learn !== false,
+      active_mode: dbUser.active_mode === "teacher" ? "teacher" : "learner",
+      can_teach: true,
+      can_learn: true,
       is_reviewer: Boolean(dbUser.is_reviewer),
       skills: dbUser.skills || [],
     };
@@ -6270,6 +6545,12 @@ application.get("/api/auth/me", authenticateToken, async (request, response) => 
     }
 
     const u = res.rows[0];
+    if (u.can_teach !== true || u.can_learn !== true) {
+      await query(
+        `UPDATE users SET can_teach = TRUE, can_learn = TRUE WHERE id = $1`,
+        [u.id]
+      ).catch(() => {});
+    }
     const safeUser = {
       id: u.id,
       name: u.name,
@@ -6283,9 +6564,9 @@ application.get("/api/auth/me", authenticateToken, async (request, response) => 
       social_profiles: u.social_profiles || {},
       avatar_url: u.avatar_url || null,
       reputation_score: parseFloat(u.reputation_score) || 5.0,
-      active_mode: u.active_mode || "learner",
-      can_teach: u.can_teach !== false,
-      can_learn: u.can_learn !== false,
+      active_mode: u.active_mode === "teacher" ? "teacher" : "learner",
+      can_teach: true,
+      can_learn: true,
       is_reviewer: Boolean(u.is_reviewer),
       skills: u.skills || [],
     };

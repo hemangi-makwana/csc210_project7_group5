@@ -14,7 +14,7 @@ import { Loader, EmptyState, ErrorState, SuccessState } from '../components/Feed
 import { BellIcon, CheckIcon } from '../components/Icons.jsx';
 
 export function Notifications() {
-  const { user } = useAuth();
+  const { user, setMode } = useAuth();
 
   const [notifications, setNotifications] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -26,7 +26,12 @@ export function Notifications() {
     setErrorMessage(null);
     try {
       const res = await getMyNotifications();
-      setNotifications(res.notifications || []);
+      const rawList = res.notifications || [];
+      const cleanList = rawList.filter((n) => {
+        const text = `${n.type || ''} ${n.title || ''} ${n.message || ''} ${n.link || ''}`.toLowerCase();
+        return !text.includes('quiz') && !text.includes('test workflow');
+      });
+      setNotifications(cleanList);
     } catch (err) {
       setErrorMessage(err.message || 'Failed to load notifications.');
     } finally {
@@ -129,11 +134,22 @@ export function Notifications() {
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
                 {notif.link ? (
                   <Link
-                    to={notif.link.replace('/skills/search?query=', '/search?query=')}
+                    to={
+                      notif.type === 'booking_received'
+                        ? '/requests'
+                        : notif.link.replace('/skills/search?query=', '/search?query=')
+                    }
+                    onClick={() => {
+                      if (notif.type === 'booking_received' || notif.link.includes('view=teaching')) {
+                        setMode('teacher');
+                      } else if (notif.link.includes('view=learning')) {
+                        setMode('learner');
+                      }
+                    }}
                     className="btn btn-sm btn-outline"
                     style={{ fontSize: '0.8rem' }}
                   >
-                    View Details →
+                    {notif.type === 'booking_received' ? 'Review in Incoming Learner Requests →' : 'View Details →'}
                   </Link>
                 ) : (
                   <div />

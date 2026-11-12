@@ -9,12 +9,28 @@
  * - Provides mode toggling (Learner ⇄ Teacher) for the entire application.
  */
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { loginUser, registerUser, getMe } from '../api/auth.js';
 import { updateUserProfile } from '../api/skills.js';
 
 // Create the Context object
 const AuthContext = createContext(null);
+
+function normalizeUserCapabilities(u, fallbackMode) {
+  if (!u) return null;
+  const validMode =
+    fallbackMode === 'teacher' || fallbackMode === 'learner'
+      ? fallbackMode
+      : u.active_mode === 'teacher'
+      ? 'teacher'
+      : 'learner';
+  return {
+    ...u,
+    active_mode: validMode,
+    can_teach: true,
+    can_learn: true,
+  };
+}
 
 /**
  * AuthProvider wraps the application and provides authentication state,
@@ -26,8 +42,11 @@ export function AuthProvider({ children }) {
 
   // Active view/interaction mode: 'learner' or 'teacher' (controls role-specific actions/views)
   const [mode, setModeState] = useState(() => {
-    return localStorage.getItem('skillexchange_mode') || 'learner';
+    const saved = localStorage.getItem('skillexchange_mode');
+    return saved === 'teacher' ? 'teacher' : 'learner';
   });
+
+  const userSwitchedModeRef = useRef(false);
 
   // Independent Visual Theme: 'light' or 'dark' (Default is LIGHT MODE)
   const [theme, setThemeState] = useState(() => {
@@ -54,26 +73,39 @@ export function AuthProvider({ children }) {
       try {
         const storedToken = localStorage.getItem('token');
         const storedUserData = localStorage.getItem('user_data');
+        const storedMode = localStorage.getItem('skillexchange_mode');
 
         if (storedToken && storedUserData) {
           const parsedUser = JSON.parse(storedUserData);
-          setUser(parsedUser);
-
-          // If user object has an active_mode from PostgreSQL, sync it
-          if (parsedUser.active_mode) {
-            setModeState(parsedUser.active_mode);
-            localStorage.setItem('skillexchange_mode', parsedUser.active_mode);
-          }
+          const initialMode =
+            storedMode === 'teacher' || storedMode === 'learner'
+              ? storedMode
+              : parsedUser.active_mode === 'teacher'
+              ? 'teacher'
+              : 'learner';
+          const normalizedLocal = normalizeUserCapabilities(parsedUser, initialMode);
+          setUser(normalizedLocal);
+          setModeState(initialMode);
+          localStorage.setItem('skillexchange_mode', initialMode);
+          localStorage.setItem('user_data', JSON.stringify(normalizedLocal));
 
           // Verify token against backend PostgreSQL to clear expired or invalid sessions
           try {
             const meRes = await getMe();
             if (meRes && meRes.user) {
-              setUser(meRes.user);
-              localStorage.setItem('user_data', JSON.stringify(meRes.user));
-              if (meRes.user.active_mode) {
-                setModeState(meRes.user.active_mode);
-                localStorage.setItem('skillexchange_mode', meRes.user.active_mode);
+              const latestMode = userSwitchedModeRef.current
+                ? (localStorage.getItem('skillexchange_mode') === 'teacher' ? 'teacher' : 'learner')
+                : (storedMode === 'teacher' || storedMode === 'learner'
+                    ? storedMode
+                    : meRes.user.active_mode === 'teacher'
+                    ? 'teacher'
+                    : 'learner');
+              const normalizedServer = normalizeUserCapabilities(meRes.user, latestMode);
+              setUser(normalizedServer);
+              localStorage.setItem('user_data', JSON.stringify(normalizedServer));
+              if (!userSwitchedModeRef.current) {
+                setModeState(latestMode);
+                localStorage.setItem('skillexchange_mode', latestMode);
               }
             }
           } catch (verifyErr) {
@@ -140,19 +172,30 @@ export function AuthProvider({ children }) {
   /**
    * Sets the active mode ('learner' | 'teacher').
    * Persists immediately to localStorage and synchronizes with PostgreSQL.
+   * Every account (demo or personal) can freely switch in either direction.
    */
   async function setMode(newMode) {
-    const validMode = newMode === 'teacher' ? 'teacher' : 'learner';
+    const validMode = String(newMode || '').toLowerCase() === 'teacher' ? 'teacher' : 'learner';
+    userSwitchedModeRef.current = true;
     setModeState(validMode);
     localStorage.setItem('skillexchange_mode', validMode);
 
-    if (user && user.id) {
-      const updatedUser = { ...user, active_mode: validMode };
-      setUser(updatedUser);
+    let currentUserId = user?.id;
+    setUser((prev) => {
+      if (!prev) return prev;
+      currentUserId = prev.id;
+      const updatedUser = normalizeUserCapabilities(prev, validMode);
       localStorage.setItem('user_data', JSON.stringify(updatedUser));
+      return updatedUser;
+    });
 
+    if (currentUserId) {
       try {
-        await updateUserProfile(user.id, { active_mode: validMode });
+        await updateUserProfile(currentUserId, {
+          active_mode: validMode,
+          can_teach: true,
+          can_learn: true,
+        });
       } catch (err) {
         console.warn('Could not persist mode switch to server, kept local:', err.message);
       }
@@ -170,17 +213,11 @@ export function AuthProvider({ children }) {
   /**
    * Updates user capabilities (can_teach, can_learn) and persists to PostgreSQL.
    */
-  async function updateCapabilities({ canTeach, canLearn }) {
+  async function updateCapabilities() {
     if (!user || !user.id) return;
-    const payload = {};
-    if (canTeach !== undefined) payload.can_teach = Boolean(canTeach);
-    if (canLearn !== undefined) payload.can_learn = Boolean(canLearn);
+    const payload = { can_teach: true, can_learn: true };
 
-    const updatedUser = {
-      ...user,
-      can_teach: payload.can_teach !== undefined ? payload.can_teach : user.can_teach,
-      can_learn: payload.can_learn !== undefined ? payload.can_learn : user.can_learn,
-    };
+    const updatedUser = normalizeUserCapabilities(user, mode);
     setUser(updatedUser);
     localStorage.setItem('user_data', JSON.stringify(updatedUser));
 
@@ -195,8 +232,8 @@ export function AuthProvider({ children }) {
    * Locally updates cached user object in state and localStorage.
    */
   function updateLocalUser(newUserData) {
-    setUser(prev => {
-      const merged = { ...prev, ...newUserData };
+    setUser((prev) => {
+      const merged = normalizeUserCapabilities({ ...prev, ...newUserData }, newUserData?.active_mode || mode);
       localStorage.setItem('user_data', JSON.stringify(merged));
       return merged;
     });
@@ -209,16 +246,18 @@ export function AuthProvider({ children }) {
     const response = await loginUser(email, password);
 
     if (response && response.token && response.user) {
+      const userMode = response.user.active_mode === 'teacher' ? 'teacher' : 'learner';
+      const normalized = normalizeUserCapabilities(response.user, userMode);
       localStorage.setItem('token', response.token);
-      localStorage.setItem('user_data', JSON.stringify(response.user));
+      localStorage.setItem('user_data', JSON.stringify(normalized));
 
-      const userMode = response.user.active_mode || 'learner';
+      userSwitchedModeRef.current = false;
       setModeState(userMode);
       localStorage.setItem('skillexchange_mode', userMode);
 
-      setUser(response.user);
+      setUser(normalized);
       setSessionExpired(false);
-      return response.user;
+      return normalized;
     } else {
       throw new Error('Invalid response from server during login');
     }
@@ -230,16 +269,18 @@ export function AuthProvider({ children }) {
   async function register(name, email, password, role, extraFields = {}) {
     const response = await registerUser({ name, email, password, role, ...extraFields });
     if (response && response.token && response.user) {
+      const userMode = response.user.active_mode === 'teacher' ? 'teacher' : 'learner';
+      const normalized = normalizeUserCapabilities(response.user, userMode);
       localStorage.setItem('token', response.token);
-      localStorage.setItem('user_data', JSON.stringify(response.user));
+      localStorage.setItem('user_data', JSON.stringify(normalized));
 
-      const userMode = response.user.active_mode || 'learner';
+      userSwitchedModeRef.current = false;
       setModeState(userMode);
       localStorage.setItem('skillexchange_mode', userMode);
 
-      setUser(response.user);
+      setUser(normalized);
       setSessionExpired(false);
-      return response.user;
+      return normalized;
     }
     throw new Error('Invalid response from server during registration');
   }
@@ -300,8 +341,8 @@ export function AuthProvider({ children }) {
 
   const isTeacher = mode === 'teacher';
   const isLearner = mode === 'learner';
-  const canTeach = user ? (user.can_teach !== false) : true;
-  const canLearn = user ? (user.can_learn !== false) : true;
+  const canTeach = true;
+  const canLearn = true;
   // Designated Sole Reviewer: strictly authenticated account for kailashsampath15@gmail.com
   const isReviewer = Boolean(
     user &&

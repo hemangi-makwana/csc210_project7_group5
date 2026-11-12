@@ -16,14 +16,16 @@
 import { request } from './client.js';
 
 /**
- * Searches for mentors teaching a specific skill keyword.
- * @param {string} query - Keyword such as "Python", "React", or "Data Science".
+ * Searches for mentors by mentor name or teachable skill keyword.
+ * @param {string} query - Mentor name or skill keyword.
+ * @param {object} [options] - Optional fetch options (e.g. { signal }).
  * @returns {Promise<{mentors: Array, isMock?: boolean}>}
  */
-export async function searchMentorsBySkill(query) {
+export async function searchMentorsBySkill(query, options = {}) {
   const encodedQuery = encodeURIComponent(query || '');
   return await request(`/skills/search?query=${encodedQuery}`, {
     method: 'GET',
+    ...(options.signal ? { signal: options.signal } : {}),
   });
 }
 
@@ -46,6 +48,17 @@ export async function getAllMentors() {
  */
 export async function getUserProfile(userId) {
   return await request(`/users/${userId}`, {
+    method: 'GET',
+  });
+}
+
+/**
+ * Retrieves a mentor's currently verified teachable skills from the backend.
+ * @param {string} userId - Mentor's user ID.
+ * @returns {Promise<{userId: string, mentorName: string, verifiedSkills: Array, count: number}>}
+ */
+export async function getMentorVerifiedSkills(userId) {
+  return await request(`/users/${encodeURIComponent(userId)}/verified-skills`, {
     method: 'GET',
   });
 }

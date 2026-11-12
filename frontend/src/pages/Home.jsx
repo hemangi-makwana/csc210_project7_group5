@@ -58,6 +58,7 @@ export function Home() {
   // Dashboard dynamic metrics state
   const [profileData, setProfileData] = useState(null);
   const [sessions, setSessions] = useState([]);
+  const [incomingBookings, setIncomingBookings] = useState([]);
   const [userRequests, setUserRequests] = useState([]);
   const [allRequests, setAllRequests] = useState([]);
   const [notifications, setNotifications] = useState([]);
@@ -78,12 +79,13 @@ export function Home() {
     async function loadDashboardMetrics() {
       setIsLoading(true);
       try {
+        const activeRole = isTeacher ? 'teacher' : 'learner';
         // Fetch real data from PostgreSQL-backed endpoints in parallel
         const [profileRes, sessionsRes, notifsRes, userReqRes, allReqRes] = await Promise.allSettled([
           getUserProfile(activeUserId),
-          getUserSessions(activeUserId),
+          getUserSessions(activeUserId, activeRole),
           user ? getMyNotifications() : Promise.resolve({ notifications: [] }),
-          user ? getMyCourseRequests() : Promise.resolve({ requests: [] }),
+          user ? getMyCourseRequests() : Promise.resolve({ courseRequests: [], requests: [] }),
           getAllCourseRequests(),
         ]);
 
@@ -92,17 +94,33 @@ export function Home() {
         if (profileRes.status === 'fulfilled' && profileRes.value) {
           setProfileData(profileRes.value);
         }
-        if (sessionsRes.status === 'fulfilled' && sessionsRes.value && Array.isArray(sessionsRes.value.sessions)) {
-          setSessions(sessionsRes.value.sessions);
+        if (sessionsRes.status === 'fulfilled' && sessionsRes.value) {
+          const val = sessionsRes.value;
+          if (isTeacher) {
+            const allTeach = val.teachingSessions || val.sessions || [];
+            const pendingTeach =
+              val.incomingRequests ||
+              allTeach.filter((s) => s.status === 'pending' || s.status === 'queued');
+            const nonPendingTeach =
+              val.acceptedTeachingSessions ||
+              allTeach.filter((s) => s.status !== 'pending' && s.status !== 'queued');
+            setIncomingBookings(pendingTeach);
+            setSessions(nonPendingTeach);
+          } else {
+            setIncomingBookings([]);
+            setSessions(val.learningSessions || val.sessions || []);
+          }
         }
         if (notifsRes.status === 'fulfilled' && notifsRes.value && Array.isArray(notifsRes.value.notifications)) {
           setNotifications(notifsRes.value.notifications);
         }
-        if (userReqRes.status === 'fulfilled' && userReqRes.value && Array.isArray(userReqRes.value.requests)) {
-          setUserRequests(userReqRes.value.requests);
+        if (userReqRes.status === 'fulfilled' && userReqRes.value) {
+          const reqs = userReqRes.value.courseRequests || userReqRes.value.requests || [];
+          setUserRequests(Array.isArray(reqs) ? reqs : []);
         }
-        if (allReqRes.status === 'fulfilled' && allReqRes.value && Array.isArray(allReqRes.value.requests)) {
-          setAllRequests(allReqRes.value.requests);
+        if (allReqRes.status === 'fulfilled' && allReqRes.value) {
+          const reqs = allReqRes.value.courseRequests || allReqRes.value.requests || [];
+          setAllRequests(Array.isArray(reqs) ? reqs : []);
         }
       } catch (err) {
         console.error('Error loading dashboard data:', err);
@@ -115,7 +133,7 @@ export function Home() {
     return () => {
       isMounted = false;
     };
-  }, [activeUserId, user]);
+  }, [activeUserId, user, mode, isTeacher]);
 
   useEffect(() => {
     let isMounted = true;
@@ -320,9 +338,13 @@ export function Home() {
                 <RequestIcon size={24} />
               </div>
               <div style={{ flex: 1 }}>
-                <div className="stat-value">{allRequests.length}</div>
-                <div className="stat-label">Learner Requests</div>
-                <div className="stat-desc">Topics learners need</div>
+                <div className="stat-value">{incomingBookings.length + allRequests.length}</div>
+                <div className="stat-label">Incoming Learner Requests</div>
+                <div className="stat-desc">
+                  {incomingBookings.length > 0
+                    ? `${incomingBookings.length} pending 1:1 • ${allRequests.length} skill reqs`
+                    : 'Pending bookings & skill requests'}
+                </div>
               </div>
               <ChevronRightIcon size={18} className="stat-desc" />
             </Link>

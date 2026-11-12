@@ -8,15 +8,31 @@
  * Full contrast support for both Light Mode and Dark Mode.
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { SearchIcon, CloseIcon } from './Icons.jsx';
 
 export function SearchBar({
   initialValue = '',
   onSearch,
-  placeholder = 'Search by skill name (e.g. Python, React, Machine Learning, Data Structures)...',
+  onQueryChange,
+  liveSearch = true,
+  placeholder = 'Search by mentor name or skill (e.g. Alice, Python, Photography, Football)...',
 }) {
   const [searchTerm, setSearchTerm] = useState(initialValue);
+
+  useEffect(() => {
+    setSearchTerm(initialValue);
+  }, [initialValue]);
+
+  function handleChange(event) {
+    const nextValue = event.target.value;
+    setSearchTerm(nextValue);
+    if (onQueryChange) {
+      onQueryChange(nextValue);
+    } else if (liveSearch && onSearch) {
+      onSearch(nextValue);
+    }
+  }
 
   function handleSubmit(event) {
     event.preventDefault();
@@ -27,6 +43,9 @@ export function SearchBar({
 
   function handleClear() {
     setSearchTerm('');
+    if (onQueryChange) {
+      onQueryChange('');
+    }
     if (onSearch) {
       onSearch('');
     }
@@ -44,10 +63,10 @@ export function SearchBar({
         <input
           type="text"
           value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
+          onChange={handleChange}
           placeholder={placeholder}
           className="search-composer-input"
-          aria-label="Search mentors by skill"
+          aria-label="Search mentors by name or skill"
         />
 
         {/* Clear Button */}
