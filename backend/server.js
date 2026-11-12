@@ -5085,36 +5085,15 @@ application.post(
         }
       }
 
-      // Safely extract real text content from resume for precheck
-      let textForPrecheck = (resumeText && typeof resumeText === "string") ? resumeText.trim() : "";
-      if (!textForPrecheck && resumeFile) {
-        textForPrecheck = extractDocumentText(resumeFile.path, resumeFile.originalname);
-      }
-
-      // Execute rules-based precheck via ResumePreChecker
-      const precheckDiagnostic = ResumePreChecker.analyze(textForPrecheck, canonicalSkill);
-
-      // Evaluate document choice and review tier via VerificationDecisionTree
-      const decisionEvaluation = verificationDecisionTree.evaluate({
+      const submissionType = (resumeFile && certFile) ? 'both' : (resumeFile ? 'resume_only' : 'certificate_only');
+      const appId = `tva_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const reviewMetadata = {
+        reviewMode: "human_only",
         hasResume: Boolean(resumeFile),
         hasCertificate: Boolean(certFile),
-        resumeFormatValid: resumeFile ? [".pdf", ".docx"].includes(path.extname(resumeFile.originalname).toLowerCase()) : true,
-        certificateFormatValid: certFile ? [".pdf", ".jpg", ".jpeg", ".png"].includes(path.extname(certFile.originalname).toLowerCase()) : true,
-        skillKeywordMatches: (precheckDiagnostic.matchedKeywords || precheckDiagnostic.keywordMatches || []).length,
-        hasStandardSections: (precheckDiagnostic.detectedSections || []).length >= 2,
-        hasDateAnomalies: (precheckDiagnostic.dateAnomalies || precheckDiagnostic.anomalies || []).length > 0,
-      });
-
-      const appId = `tva_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      const combinedPrecheck = {
-        diagnostic: precheckDiagnostic,
-        decisionTree: decisionEvaluation,
-        textExtracted: Boolean(textForPrecheck && textForPrecheck.length > 0),
-        extractedLength: textForPrecheck ? textForPrecheck.length : 0,
-        preliminaryNotice: "Preliminary automated completeness & keyword check assists applicant and reviewer. Does not verify the factual truth of qualifications, nor does it automatically approve or reject any applicant. A human reviewer makes every decision. Review typically takes 2 business days.",
+        submissionType,
+        notice: "All applications are reviewed manually by our designated reviewer. Review typically takes 2 business days.",
       };
-
-      const submissionType = (resumeFile && certFile) ? 'both' : (resumeFile ? 'resume_only' : 'certificate_only');
       const initialHistory = JSON.stringify([
         {
           action: "initial_submission",
@@ -5147,7 +5126,7 @@ application.post(
           certFile ? certFile.originalname : null,
           certFile ? certFile.mimetype : null,
           certFile ? certFile.size : null,
-          JSON.stringify(combinedPrecheck),
+          JSON.stringify(reviewMetadata),
           initialHistory,
         ]
       );
@@ -5184,7 +5163,6 @@ application.post(
       return response.status(201).json({
         message: "Application submitted successfully. Review typically takes 2 business days.",
         application: insertRes.rows[0],
-        precheck: combinedPrecheck,
         estimatedReviewTime: "Typically 2 business days",
       });
     } catch (error) {
@@ -5313,29 +5291,12 @@ application.post(
 
       const submissionType = (finalResumeFile && finalCertFile) ? "both" : (finalResumeFile ? "resume_only" : "certificate_only");
 
-      // Safely extract real text content from resume for precheck re-evaluation
-      let textForPrecheck = (resumeText && typeof resumeText === "string") ? resumeText.trim() : "";
-      if (!textForPrecheck && newResume) {
-        textForPrecheck = extractDocumentText(newResume.path, newResume.originalname);
-      }
-
-      const precheckDiagnostic = ResumePreChecker.analyze(textForPrecheck, app.skill_name);
-      const decisionEvaluation = verificationDecisionTree.evaluate({
+      const reviewMetadata = {
+        reviewMode: "human_only",
         hasResume: Boolean(finalResumeFile),
         hasCertificate: Boolean(finalCertFile),
-        resumeFormatValid: finalResumeOriginal ? [".pdf", ".docx"].includes(path.extname(finalResumeOriginal).toLowerCase()) : true,
-        certificateFormatValid: finalCertOriginal ? [".pdf", ".jpg", ".jpeg", ".png"].includes(path.extname(finalCertOriginal).toLowerCase()) : true,
-        skillKeywordMatches: (precheckDiagnostic.matchedKeywords || precheckDiagnostic.keywordMatches || []).length,
-        hasStandardSections: (precheckDiagnostic.detectedSections || []).length >= 2,
-        hasDateAnomalies: (precheckDiagnostic.dateAnomalies || precheckDiagnostic.anomalies || []).length > 0,
-      });
-
-      const combinedPrecheck = {
-        diagnostic: precheckDiagnostic,
-        decisionTree: decisionEvaluation,
-        textExtracted: Boolean(textForPrecheck && textForPrecheck.length > 0),
-        extractedLength: textForPrecheck ? textForPrecheck.length : 0,
-        preliminaryNotice: "Preliminary automated completeness & keyword check assists applicant and reviewer. Does not verify the factual truth of qualifications, nor does it automatically approve or reject any applicant. A human reviewer makes every decision. Review typically takes 2 business days.",
+        submissionType,
+        notice: "All applications are reviewed manually by our designated reviewer. Review typically takes 2 business days.",
       };
 
       const updateRes = await query(
@@ -5367,7 +5328,7 @@ application.post(
           finalCertOriginal,
           finalCertMime,
           finalCertSize,
-          JSON.stringify(combinedPrecheck),
+          JSON.stringify(reviewMetadata),
           updatedHistory,
           notes ? `Applicant update: ${notes.trim()}` : null,
           appId,
@@ -5406,7 +5367,6 @@ application.post(
       return response.status(200).json({
         message: "Documents successfully updated and resubmitted. Review typically takes 2 business days.",
         application: updateRes.rows[0],
-        precheck: combinedPrecheck,
         estimatedReviewTime: "Typically 2 business days",
       });
     } catch (error) {

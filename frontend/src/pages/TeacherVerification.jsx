@@ -72,7 +72,6 @@ export function TeacherVerification() {
   const [selectedSkill, setSelectedSkill] = useState('');
   const [customSkill, setCustomSkill] = useState('');
   const [notes, setNotes] = useState('');
-  const [resumeText, setResumeText] = useState('');
   const [resumeFile, setResumeFile] = useState(null);
   const [certificateFile, setCertificateFile] = useState(null);
 
@@ -175,7 +174,6 @@ export function TeacherVerification() {
       const formData = new FormData();
       formData.append('skillName', targetSkill);
       if (notes) formData.append('notes', notes);
-      if (resumeText) formData.append('resumeText', resumeText);
       if (resumeFile) formData.append('resume', resumeFile);
       if (certificateFile) formData.append('certificate', certificateFile);
 
@@ -187,7 +185,6 @@ export function TeacherVerification() {
       // Reset form
       setResumeFile(null);
       setCertificateFile(null);
-      setResumeText('');
       setNotes('');
       setSelectedSkill('');
       setCustomSkill('');
@@ -515,21 +512,10 @@ export function TeacherVerification() {
                       </div>
                     )}
                   </div>
+                  <p style={{ fontSize: '0.78rem', color: 'var(--color-text-muted)', marginTop: '0.4rem', marginBottom: 0 }}>
+                    For multiple certificates, combine them into a single PDF before uploading.
+                  </p>
                 </div>
-              </div>
-
-              {/* Optional Text Field for Resume Pre-Check */}
-              <div className="form-group" style={{ marginBottom: '1.25rem' }}>
-                <label className="form-label" style={{ fontWeight: '700' }}>
-                  Optional Resume Text / Summary (for instant preliminary feedback)
-                </label>
-                <textarea
-                  value={resumeText}
-                  onChange={(e) => setResumeText(e.target.value)}
-                  placeholder="Paste work experience, education, or key achievements related to this skill..."
-                  className="form-textarea"
-                  rows={4}
-                />
               </div>
 
               {/* Additional Applicant Notes */}
@@ -546,16 +532,15 @@ export function TeacherVerification() {
                 />
               </div>
 
-              {/* Ethical Automation / Pre-Check Notice */}
+              {/* Human Review & Turnaround Notice */}
               <div className="precheck-feedback-card" style={{ marginBottom: '1.5rem' }}>
                 <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '0.4rem', color: 'var(--color-primary)', fontWeight: '700' }}>
                   <ShieldCheckIcon size={18} />
-                  <span>Preliminary Pre-Check Policy</span>
+                  <span>Human Review Process</span>
                 </div>
                 <p style={{ fontSize: '0.82rem', color: 'var(--color-text-secondary)', lineHeight: 1.5, margin: 0 }}>
-                  Automated checks scan for relevant skill keywords, expected resume sections (Experience, Education, Skills), and date consistency.
-                  <strong> This pre-check is preliminary feedback only.</strong> It does NOT automatically approve or reject any applicant.
-                  All final decisions are adjudicated by our review team.
+                  Your documents are checked only for allowed file types and size limits, and kept private to you and our authorized reviewer.
+                  Every approval or rejection decision is made manually by a human reviewer. Review typically takes <strong>2 business days</strong>.
                 </p>
               </div>
 
@@ -626,8 +611,6 @@ export function TeacherVerification() {
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
                 {applications.map((app) => {
-                  const precheck = app.precheck_results || {};
-                  const diag = precheck.diagnostic || {};
                   const isUnderReviewOrSubmitted = ['submitted', 'under_review'].includes(app.status);
                   const canResubmit = ['needs_information', 'rejected', 'submitted'].includes(app.status);
                   const isResubmitOpen = resubmittingAppId === app.id;
@@ -750,46 +733,26 @@ export function TeacherVerification() {
                         </div>
                       )}
 
-                      {/* Resume Screening / Pre-Check Findings Card */}
-                      {(diag.keywordMatches || diag.detectedSections || diag.anomalies) && (
-                        <div
-                          style={{
-                            padding: '0.85rem 1rem',
-                            borderRadius: '8px',
-                            backgroundColor: 'rgba(37, 99, 235, 0.04)',
-                            border: '1px solid var(--color-border)',
-                            marginBottom: '1rem',
-                            fontSize: '0.84rem',
-                          }}
-                        >
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.35rem', flexWrap: 'wrap', gap: '0.5rem' }}>
-                            <span style={{ fontWeight: '700', color: 'var(--color-primary)' }}>
-                              Automated Preliminary Check Findings
-                            </span>
-                            <span style={{ fontSize: '0.74rem', color: 'var(--color-text-muted)' }}>
-                              Assists Reviewer • Not a Final Decision
-                            </span>
-                          </div>
-                          <p style={{ fontSize: '0.8rem', color: 'var(--color-text-secondary)', margin: '0 0 0.5rem', lineHeight: '1.45' }}>
-                            <em>Preliminary automated check scans document completeness and skill keyword relevance. It does not verify the factual truth of qualifications or automatically approve/reject an applicant. A human reviewer makes every decision.</em>
-                          </p>
-                          {diag.keywordMatches && diag.keywordMatches.length > 0 && (
-                            <div style={{ fontSize: '0.8rem', color: 'var(--color-text-secondary)', marginBottom: '0.2rem' }}>
-                              <strong>Relevant Keywords Detected:</strong> {diag.keywordMatches.join(', ')}
-                            </div>
-                          )}
-                          {diag.detectedSections && diag.detectedSections.length > 0 && (
-                            <div style={{ fontSize: '0.8rem', color: 'var(--color-text-secondary)', marginBottom: '0.2rem' }}>
-                              <strong>Resume Sections Identified:</strong> {diag.detectedSections.join(', ')}
-                            </div>
-                          )}
-                          {diag.anomalies && diag.anomalies.length > 0 && (
-                            <div style={{ fontSize: '0.8rem', color: 'var(--color-danger)', marginTop: '0.2rem' }}>
-                              <strong>Notes:</strong> {diag.anomalies.join('; ')}
-                            </div>
-                          )}
-                        </div>
-                      )}
+                      {/* Status & Next Steps */}
+                      <div
+                        style={{
+                          padding: '0.75rem 1rem',
+                          borderRadius: '8px',
+                          backgroundColor: 'rgba(37, 99, 235, 0.04)',
+                          border: '1px solid var(--color-border)',
+                          marginBottom: '1rem',
+                          fontSize: '0.82rem',
+                          color: 'var(--color-text-secondary)',
+                          lineHeight: '1.45',
+                        }}
+                      >
+                        <strong style={{ color: 'var(--color-text-primary)' }}>Next Steps: </strong>
+                        {app.status === 'submitted' && 'Your application is in the queue for manual review. Review typically takes 2 business days.'}
+                        {app.status === 'under_review' && 'A human reviewer is currently reviewing your uploaded documents. You will be notified once a decision is made.'}
+                        {app.status === 'needs_information' && 'Please review the reviewer’s note above and upload updated documents or a clarification below.'}
+                        {app.status === 'approved' && 'Your teaching skill is verified! Learners can now see your verified badge and book sessions with you for this skill.'}
+                        {app.status === 'rejected' && 'You may upload updated or replacement documents below to submit a new review request.'}
+                      </div>
 
                       {/* Application Revision History */}
                       {historyList.length > 1 && (
@@ -868,6 +831,9 @@ export function TeacherVerification() {
                                     onChange={(e) => setResubmitCertFile(e.target.files[0] || null)}
                                     style={{ fontSize: '0.82rem' }}
                                   />
+                                  <div style={{ fontSize: '0.74rem', color: 'var(--color-text-muted)', marginTop: '0.25rem' }}>
+                                    For multiple certificates, combine them into a single PDF before uploading.
+                                  </div>
                                 </div>
                               </div>
 

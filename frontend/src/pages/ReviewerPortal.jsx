@@ -886,53 +886,22 @@ export default function ReviewerPortal() {
               </div>
             </div>
 
-            {/* Preliminary Resume Pre-Check Findings */}
-            {selectedApp.precheck_results && (
-              <div
-                style={{
-                  padding: '1rem',
-                  borderRadius: '8px',
-                  backgroundColor: 'rgba(37, 99, 235, 0.05)',
-                  border: '1px solid rgba(37, 99, 235, 0.2)',
-                  marginBottom: '1.25rem',
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.45rem', flexWrap: 'wrap', gap: '0.5rem' }}>
-                  <span style={{ fontWeight: '700', fontSize: '0.88rem', color: 'var(--color-primary)' }}>
-                    Preliminary Automated Check Findings
-                  </span>
-                  <span style={{ fontSize: '0.72rem', color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
-                    Assists Reviewer • Not an Automated Decision
-                  </span>
-                </div>
-                <p style={{ fontSize: '0.8rem', color: 'var(--color-text-secondary)', margin: '0 0 0.5rem', lineHeight: '1.45' }}>
-                  <em>Automated check scans for relevant skill keywords and expected sections. It does not verify the factual truth of qualifications, nor does it automatically approve or reject any applicant. A human reviewer makes every decision.</em>
-                </p>
-                <div style={{ fontSize: '0.82rem', color: 'var(--color-text-secondary)', lineHeight: '1.5' }}>
-                  {selectedApp.precheck_results.message && (
-                    <div style={{ marginBottom: '0.45rem' }}>{selectedApp.precheck_results.message}</div>
-                  )}
-                  {selectedApp.precheck_results.matchedKeywords && selectedApp.precheck_results.matchedKeywords.length > 0 && (
-                    <div style={{ marginTop: '0.35rem' }}>
-                      <strong>Skill Keywords Detected:</strong>{' '}
-                      {selectedApp.precheck_results.matchedKeywords.join(', ')}
-                    </div>
-                  )}
-                  {selectedApp.precheck_results.detectedSections && selectedApp.precheck_results.detectedSections.length > 0 && (
-                    <div style={{ marginTop: '0.25rem' }}>
-                      <strong>Resume Sections Found:</strong>{' '}
-                      {selectedApp.precheck_results.detectedSections.join(', ')}
-                    </div>
-                  )}
-                  {selectedApp.precheck_results.inconsistencies && selectedApp.precheck_results.inconsistencies.length > 0 && (
-                    <div style={{ marginTop: '0.35rem', color: '#dc2626' }}>
-                      <strong>Potential Inconsistencies:</strong>{' '}
-                      {selectedApp.precheck_results.inconsistencies.join('; ')}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
+            {/* Human Review Guidance */}
+            <div
+              style={{
+                padding: '0.9rem 1rem',
+                borderRadius: '8px',
+                backgroundColor: 'rgba(37, 99, 235, 0.05)',
+                border: '1px solid rgba(37, 99, 235, 0.2)',
+                marginBottom: '1.25rem',
+                fontSize: '0.82rem',
+                color: 'var(--color-text-secondary)',
+                lineHeight: '1.5',
+              }}
+            >
+              <strong style={{ color: 'var(--color-primary)' }}>Manual Review Guidelines: </strong>
+              Inspect the applicant’s uploaded resume and/or certificate above, then select an action below. Every approval, information request, or rejection decision is made solely by you and recorded in the application history.
+            </div>
 
             {/* Document Revision History */}
             {selectedApp.history && Array.isArray(selectedApp.history) && selectedApp.history.length > 0 && (
