@@ -37,6 +37,13 @@ export function ProfileCard({ user, matchScore = null, matchReason = null, break
     ? user.skill_entries
     : (user.skills || []);
   const taughtSkills = allSkills.filter(s => typeof s === 'string' || s.type === 'teach');
+  const verifiedTaughtSkillNames = (
+    Array.isArray(user.verified_skills) && user.verified_skills.length > 0
+      ? user.verified_skills.map(s => (typeof s === 'string' ? s : s.skill_name))
+      : taughtSkills
+          .filter(s => typeof s === 'object' && Boolean(s.is_verified))
+          .map(s => s.skill_name)
+  ).filter(Boolean);
   const wantedSkills = allSkills.filter(s => typeof s !== 'string' && s.type === 'learn');
 
   const avatarSrc = user.avatar_url
@@ -191,7 +198,7 @@ export function ProfileCard({ user, matchScore = null, matchReason = null, break
       <div style={{ marginTop: 'auto', paddingTop: '0.75rem', borderTop: '1px solid var(--color-border-subtle)', display: 'flex', gap: '0.5rem' }}>
         {isLearner && (
           <Link
-            to={`/booking?mentorId=${encodeURIComponent(user.id || user.userId || '')}&mentorName=${encodeURIComponent(user.name || '')}`}
+            to={`/booking?mentorId=${encodeURIComponent(user.id || user.userId || '')}&mentorName=${encodeURIComponent(user.name || '')}${verifiedTaughtSkillNames.length === 1 ? `&skill=${encodeURIComponent(verifiedTaughtSkillNames[0])}` : ''}`}
             className="btn btn-primary"
             style={{ flex: 1, textAlign: 'center' }}
           >

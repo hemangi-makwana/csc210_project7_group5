@@ -13,7 +13,7 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useSearchParams, Link } from 'react-router-dom';
+import { useSearchParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import {
   getConversations,
@@ -26,6 +26,7 @@ import {
   getCallSignals,
   getConnections,
 } from '../api/messages.js';
+import { getMentorVerifiedSkills } from '../api/skills.js';
 import { Loader, ErrorState, EmptyState } from '../components/Feedback.jsx';
 import {
   MessageIcon,
@@ -49,6 +50,81 @@ const MAX_VOICE_DURATION_SECONDS = 300; // 5 minutes max
 const MAX_VOICE_BYTES = 10 * 1024 * 1024; // 10 MB max
 const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024; // 15 MB max
 const RINGING_TIMEOUT_MS = 35000; // 35 seconds ringing timeout before missed call
+const GROUP_TIMESTAMP_GAP_MS = 5 * 60 * 1000; // 5 minutes grouping threshold
+
+function formatFileSize(bytes) {
+  const b = Number(bytes) || 0;
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+  return `${(b / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function isSameCalendarDay(d1, d2) {
+  return (
+    d1.getFullYear() === d2.getFullYear() &&
+    d1.getMonth() === d2.getMonth() &&
+    d1.getDate() === d2.getDate()
+  );
+}
+
+/**
+ * Determines whether a message starts a new timestamp group:
+ * - First message in the thread
+ * - Calendar date changed from previous message
+ * - Time gap from previous message exceeds 5 minutes
+ */
+function shouldShowGroupTimestamp(msg, prevMsg) {
+  if (!prevMsg) return true;
+  if (!msg?.created_at || !prevMsg?.created_at) return false;
+  const currDate = new Date(msg.created_at);
+  const prevDate = new Date(prevMsg.created_at);
+  if (Number.isNaN(currDate.getTime()) || Number.isNaN(prevDate.getTime())) return false;
+  if (!isSameCalendarDay(currDate, prevDate)) return true;
+  return Math.abs(currDate.getTime() - prevDate.getTime()) > GROUP_TIMESTAMP_GAP_MS;
+}
+
+function formatGroupTimestamp(createdAt, prevCreatedAt = null) {
+  if (!createdAt) return '';
+  const currDate = new Date(createdAt);
+  if (Number.isNaN(currDate.getTime())) return '';
+  const timePart = currDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const prevDate = prevCreatedAt ? new Date(prevCreatedAt) : null;
+  const dateChanged = !prevDate || Number.isNaN(prevDate.getTime()) || !isSameCalendarDay(currDate, prevDate);
+
+  if (!dateChanged) {
+    return timePart;
+  }
+
+  const now = new Date();
+  if (isSameCalendarDay(currDate, now)) {
+    return `Today, ${timePart}`;
+  }
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (isSameCalendarDay(currDate, yesterday)) {
+    return `Yesterday, ${timePart}`;
+  }
+  const datePart = currDate.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+  return `${datePart}, ${timePart}`;
+}
+
+function formatCallDurationHuman(totalSec) {
+  const safeSec = Math.max(0, Math.floor(Number(totalSec) || 0));
+  const mins = Math.floor(safeSec / 60);
+  const secs = safeSec % 60;
+  return `${mins}m ${secs}s`;
+}
+
+function formatCallLogContent(msg) {
+  if (!msg) return '';
+  if (msg.call_action === 'ended' && typeof msg.duration_seconds === 'number') {
+    return `Call ended (${formatCallDurationHuman(msg.duration_seconds)})`;
+  }
+  const raw = String(msg.content || '');
+  return raw.replace(/Call ended \((\d+)s\)/i, (_, secStr) => {
+    return `Call ended (${formatCallDurationHuman(Number(secStr))})`;
+  });
+}
 
 function getSupportedVoiceRecorderConfig() {
   const candidates = [
@@ -69,9 +145,15 @@ function getSupportedVoiceRecorderConfig() {
   return { mimeType: '', ext: 'webm', baseMime: 'audio/webm' };
 }
 
-export function Messages() {
+export function Messages({ forceCallTab = false }) {
   const { user, isAuthenticated, isLearner } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  const isDedicatedCallTab = Boolean(
+    forceCallTab || location.pathname === '/call' || searchParams.get('callTab') === '1'
+  );
 
   const [conversations, setConversations] = useState([]);
   const [connections, setConnections] = useState([]);
@@ -91,9 +173,19 @@ export function Messages() {
   const [isSending, setIsSending] = useState(false);
   const [errorMessage, setErrorMessage] = useState(null);
 
-  // Attachment upload state
+  // Peer mentor verified teachable skills for "Book Session" from chat
+  const [peerVerifiedSkills, setPeerVerifiedSkills] = useState([]);
+  const [loadingPeerSkills, setLoadingPeerSkills] = useState(false);
+  const [bookingSkillWarning, setBookingSkillWarning] = useState(null);
+
+  // Pending Attachment Composer state (staged file preview before sending)
+  const [pendingAttachment, setPendingAttachment] = useState(null); // { file, name, size, mimeType, ext, isImage, isPdf, previewUrl }
   const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
   const fileInputRef = useRef(null);
+
+  // Separate Call Tab notices & pop-up blocker recovery
+  const [callTabOpenedNotice, setCallTabOpenedNotice] = useState(null);
+  const [popupBlockedNotice, setPopupBlockedNotice] = useState(null);
 
   // Audio Voice Note state
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
@@ -412,6 +504,14 @@ export function Messages() {
             const nextParams = { conversationId: String(selectedConv.id) };
             const startCallParam = searchParams.get('startCall');
             if (startCallParam) nextParams.startCall = startCallParam;
+            const callTabParam = searchParams.get('callTab');
+            if (callTabParam) nextParams.callTab = callTabParam;
+            const modeParam = searchParams.get('mode');
+            if (modeParam) nextParams.mode = modeParam;
+            const actionParam = searchParams.get('action');
+            if (actionParam) nextParams.action = actionParam;
+            const callIdParam = searchParams.get('callId');
+            if (callIdParam) nextParams.callId = callIdParam;
             setSearchParams(nextParams, { replace: true });
           }
         }
@@ -449,6 +549,83 @@ export function Messages() {
       clearInterval(pollInterval);
     };
   }, [isAuthenticated, user?.id]);
+
+  // Load peer mentor's currently verified teachable skills whenever activePeer changes
+  useEffect(() => {
+    let isCancelled = false;
+    setBookingSkillWarning(null);
+
+    if (!activePeer?.id) {
+      setPeerVerifiedSkills([]);
+      return;
+    }
+
+    setLoadingPeerSkills(true);
+    getMentorVerifiedSkills(activePeer.id)
+      .then((res) => {
+        if (isCancelled) return;
+        const list = Array.isArray(res?.verifiedSkills)
+          ? res.verifiedSkills
+          : Array.isArray(res?.verified_skills)
+          ? res.verified_skills
+          : [];
+        setPeerVerifiedSkills(list);
+      })
+      .catch(() => {
+        if (!isCancelled) setPeerVerifiedSkills([]);
+      })
+      .finally(() => {
+        if (!isCancelled) setLoadingPeerSkills(false);
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [activePeer?.id]);
+
+  // Handle clicking "Book Session" from a mentor's chat
+  async function handleBookSessionFromChat() {
+    if (!activePeer?.id) return;
+    setBookingSkillWarning(null);
+
+    let verifiedList = peerVerifiedSkills;
+    if (loadingPeerSkills || !Array.isArray(verifiedList)) {
+      try {
+        setLoadingPeerSkills(true);
+        const res = await getMentorVerifiedSkills(activePeer.id);
+        verifiedList = Array.isArray(res?.verifiedSkills)
+          ? res.verifiedSkills
+          : Array.isArray(res?.verified_skills)
+          ? res.verified_skills
+          : [];
+        setPeerVerifiedSkills(verifiedList);
+      } catch (_) {
+        verifiedList = [];
+      } finally {
+        setLoadingPeerSkills(false);
+      }
+    }
+
+    if (verifiedList.length === 0) {
+      setBookingSkillWarning(
+        `${activePeer.name || 'This mentor'} has no verified teaching skills available. Sessions can only be booked for verified skills.`
+      );
+      return;
+    }
+
+    if (verifiedList.length === 1) {
+      navigate(
+        `/booking?mentorId=${encodeURIComponent(activePeer.id)}&mentorName=${encodeURIComponent(
+          activePeer.name || ''
+        )}&skill=${encodeURIComponent(verifiedList[0].skill_name)}`
+      );
+      return;
+    }
+
+    navigate(
+      `/booking?mentorId=${encodeURIComponent(activePeer.id)}&mentorName=${encodeURIComponent(activePeer.name || '')}`
+    );
+  }
 
   // Sync active conversation if URL searchParams change externally (e.g., clicking a notification)
   useEffect(() => {
@@ -534,10 +711,77 @@ export function Messages() {
     };
   }, [activeConvId, isAuthenticated]);
 
-  // Send regular text message
+  // Clear pending attachment preview and revoke object URL
+  const clearPendingAttachment = useCallback(() => {
+    setPendingAttachment((prev) => {
+      if (prev && prev.previewUrl) {
+        try {
+          URL.revokeObjectURL(prev.previewUrl);
+        } catch (_) {}
+      }
+      return null;
+    });
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  }, []);
+
+  // Upload and send the staged pendingAttachment only when the user confirms sending
+  const sendPendingAttachment = useCallback(async () => {
+    if (!pendingAttachment || !pendingAttachment.file || !activeConvId) return false;
+
+    const { file, name } = pendingAttachment;
+    setIsUploadingAttachment(true);
+    setErrorMessage(null);
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const res = await uploadAttachment(activeConvId, formData);
+      if (res && res.message) {
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === res.message.id)) return prev;
+          return [...prev, res.message];
+        });
+        setConversations((prev) =>
+          prev.map((c) =>
+            String(c.id) === String(activeConvId)
+              ? {
+                  ...c,
+                  last_message_content: `[Attachment] ${name}`,
+                  last_message_time: res.message.created_at || new Date().toISOString(),
+                }
+              : c
+          )
+        );
+        if (callStatusRef.current !== 'idle') {
+          sendCallSignal(activeConvId, 'chat_sync', { messageId: res.message.id }).catch(() => {});
+        }
+      }
+      clearPendingAttachment();
+      return true;
+    } catch (err) {
+      setErrorMessage(err.message || 'Failed to upload attachment.');
+      return false;
+    } finally {
+      setIsUploadingAttachment(false);
+    }
+  }, [pendingAttachment, activeConvId, clearPendingAttachment]);
+
+  // Send regular text message (and/or staged pending attachment if present)
   async function handleSendMessage(e) {
-    e.preventDefault();
-    if (!messageText.trim() || !activeConvId) return;
+    if (e) e.preventDefault();
+    if (!activeConvId) return;
+
+    const hasStagedFile = Boolean(pendingAttachment && pendingAttachment.file);
+    const hasText = Boolean(messageText.trim());
+    if (!hasStagedFile && !hasText) return;
+
+    if (hasStagedFile) {
+      const uploadedOk = await sendPendingAttachment();
+      if (!uploadedOk || !hasText) return;
+    }
 
     const content = messageText.trim();
     setMessageText('');
@@ -574,13 +818,13 @@ export function Messages() {
     }
   }
 
-  // Handle file attachment selection (images, PDF, DOCX, XLSX)
-  async function handleFileSelected(e) {
+  // Handle file attachment selection (stages in Pending Attachment Composer before uploading)
+  function handleFileSelected(e) {
     const file = e.target.files?.[0];
     if (!file || !activeConvId) return;
 
     if (file.size === 0) {
-      setErrorMessage('Cannot upload an empty (0-byte) file.');
+      setErrorMessage('Cannot attach an empty (0-byte) file.');
       if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
@@ -604,39 +848,33 @@ export function Messages() {
       return;
     }
 
-    setIsUploadingAttachment(true);
     setErrorMessage(null);
+    const isImage =
+      ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext) ||
+      Boolean(file.type && file.type.startsWith('image/'));
+    const isPdf = ext === 'pdf' || file.type === 'application/pdf';
+    const previewUrl = isImage || isPdf ? URL.createObjectURL(file) : null;
 
-    const formData = new FormData();
-    formData.append('file', file);
-
-    try {
-      const res = await uploadAttachment(activeConvId, formData);
-      if (res && res.message) {
-        setMessages((prev) => {
-          if (prev.some((m) => m.id === res.message.id)) return prev;
-          return [...prev, res.message];
-        });
-        setConversations((prev) =>
-          prev.map((c) =>
-            String(c.id) === String(activeConvId)
-              ? {
-                  ...c,
-                  last_message_content: `[Attachment] ${file.name}`,
-                  last_message_time: res.message.created_at || new Date().toISOString(),
-                }
-              : c
-          )
-        );
-        if (callStatus !== 'idle') {
-          sendCallSignal(activeConvId, 'chat_sync', { messageId: res.message.id }).catch(() => {});
-        }
+    setPendingAttachment((prev) => {
+      if (prev && prev.previewUrl) {
+        try {
+          URL.revokeObjectURL(prev.previewUrl);
+        } catch (_) {}
       }
-    } catch (err) {
-      setErrorMessage(err.message || 'Failed to upload attachment.');
-    } finally {
-      setIsUploadingAttachment(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
+      return {
+        file,
+        name: file.name,
+        size: file.size,
+        mimeType: file.type || ext.toUpperCase(),
+        ext: ext.toUpperCase(),
+        isImage,
+        isPdf,
+        previewUrl,
+      };
+    });
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
     }
   }
 
@@ -892,18 +1130,45 @@ export function Messages() {
         video: mode === 'video' ? { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' } : false,
       });
     } catch (err) {
-      // If video requested but no camera device is connected/found or camera is busy, fall back to audio-only
+      // If video requested but no camera device is connected/found or camera is busy in another tab, fall back to audio while keeping video stage active
       if (
         mode === 'video' &&
         (err.name === 'NotFoundError' ||
           err.name === 'DevicesNotFoundError' ||
           err.name === 'OverconstrainedError' ||
-          err.name === 'NotReadableError')
+          err.name === 'NotReadableError' ||
+          err.name === 'AbortError')
       ) {
-        const audioStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false });
-        setCallMode('audio');
-        setIsVideoDisabled(true);
-        return audioStream;
+        try {
+          const audioStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false });
+          setIsVideoDisabled(true);
+          setCallStatusNotice('Camera is currently in use or unavailable — connected with microphone.');
+          return audioStream;
+        } catch (audioErr) {
+          if (
+            audioErr.name === 'NotFoundError' ||
+            audioErr.name === 'DevicesNotFoundError' ||
+            audioErr.name === 'NotReadableError' ||
+            audioErr.name === 'AbortError'
+          ) {
+            setIsMicMuted(true);
+            setIsVideoDisabled(true);
+            setCallStatusNotice('Camera and microphone are currently busy — joined in listen/view mode.');
+            return new MediaStream();
+          }
+          throw audioErr;
+        }
+      }
+      if (
+        mode === 'audio' &&
+        (err.name === 'NotFoundError' ||
+          err.name === 'DevicesNotFoundError' ||
+          err.name === 'NotReadableError' ||
+          err.name === 'AbortError')
+      ) {
+        setIsMicMuted(true);
+        setCallStatusNotice('Microphone is currently busy or unavailable — joined in listen mode.');
+        return new MediaStream();
       }
       throw err;
     }
@@ -1089,8 +1354,58 @@ export function Messages() {
     }
   }, []);
 
-  // Initiate an outgoing call
-  async function initiateCall(mode = 'video') {
+  // Open a full-page call in a separate browser tab (never includes authentication tokens in URL)
+  const openCallInNewTab = useCallback(
+    (targetConvId, mode = 'video', action = 'start', callId = '') => {
+      if (!targetConvId) return false;
+      const cleanMode = mode === 'audio' ? 'audio' : 'video';
+      const cleanAction = action === 'accept' ? 'accept' : 'start';
+      const callUrl = `/call?conversationId=${encodeURIComponent(targetConvId)}&mode=${encodeURIComponent(
+        cleanMode
+      )}&action=${encodeURIComponent(cleanAction)}${
+        callId ? `&callId=${encodeURIComponent(callId)}` : ''
+      }`;
+
+      setPopupBlockedNotice(null);
+      setCallTabOpenedNotice(null);
+
+      try {
+        const newWin = window.open(callUrl, '_blank');
+        if (newWin) {
+          try {
+            newWin.focus();
+          } catch (_) {}
+          setCallTabOpenedNotice({
+            url: callUrl,
+            mode: cleanMode,
+            action: cleanAction,
+            conversationId: targetConvId,
+          });
+          if (cleanAction === 'accept') {
+            setIncomingCallData(null);
+            setOtherConvIncomingCall(null);
+            setCallStatus('idle');
+            setConnectionState('idle');
+          }
+          return true;
+        }
+      } catch (_) {}
+
+      // Browser blocked the pop-up window: show recovery banner with direct anchor link AND continue call
+      setPopupBlockedNotice({
+        url: callUrl,
+        mode: cleanMode,
+        action: cleanAction,
+        conversationId: targetConvId,
+        callId,
+      });
+      return false;
+    },
+    []
+  );
+
+  // Initiate an outgoing call (opens in a separate tab when triggered from normal chat view)
+  async function initiateCall(mode = 'video', options = {}) {
     if (!activeConvId) return;
 
     const activeConv = conversations.find((c) => String(c.id) === String(activeConvId));
@@ -1098,9 +1413,13 @@ export function Messages() {
       setErrorMessage('Cannot start a call in a closed conversation.');
       return;
     }
-    if (activeConv?.session_status && !['accepted', 'confirmed'].includes(activeConv.session_status)) {
-      setErrorMessage(`In-website calls require an accepted session (current status: "${activeConv.session_status}").`);
-      return;
+
+    if (!isDedicatedCallTab && !options.runInCurrentTab) {
+      const openedInNewTab = openCallInNewTab(activeConvId, mode, 'start');
+      if (openedInNewTab) {
+        return;
+      }
+      // If pop-up was blocked, fall through so the call still starts in the current tab alongside the pop-out link
     }
 
     try {
@@ -1186,9 +1505,38 @@ export function Messages() {
     }
   }
 
-  // Trigger auto-call if navigated from LearningHistory with ?startCall=video|audio
+  // Trigger auto-call in Dedicated Call Tab (/call or ?callTab=1) or when navigated from LearningHistory (?startCall=video|audio)
   useEffect(() => {
     const startCallMode = searchParams.get('startCall');
+    const callTabMode = searchParams.get('mode');
+    const callTabAction = searchParams.get('action') || 'start';
+    const callTabCallId = searchParams.get('callId') || '';
+
+    if (
+      isDedicatedCallTab &&
+      activeConvId &&
+      activePeer &&
+      !isLoadingList &&
+      callStatus === 'idle' &&
+      !autoStartedCallRef.current
+    ) {
+      autoStartedCallRef.current = true;
+      const targetMode = callTabMode === 'audio' ? 'audio' : 'video';
+      if (callTabAction === 'accept') {
+        acceptIncomingCall(
+          {
+            conversationId: activeConvId,
+            mode: targetMode,
+            callId: callTabCallId,
+          },
+          { runInCurrentTab: true }
+        );
+      } else {
+        initiateCall(targetMode, { runInCurrentTab: true });
+      }
+      return;
+    }
+
     if (
       startCallMode &&
       activeConvId &&
@@ -1198,23 +1546,43 @@ export function Messages() {
       !autoStartedCallRef.current
     ) {
       const activeConv = conversations.find((c) => String(c.id) === String(activeConvId));
-      if (activeConv && ['accepted', 'confirmed'].includes(activeConv.session_status)) {
+      if (activeConv && !activeConv.is_closed) {
         autoStartedCallRef.current = true;
+        const targetMode = startCallMode === 'audio' ? 'audio' : 'video';
         setSearchParams({ conversationId: String(activeConvId) }, { replace: true });
-        initiateCall(startCallMode === 'audio' ? 'audio' : 'video');
+        initiateCall(targetMode);
       }
     }
-  }, [searchParams, activeConvId, activePeer, isLoadingList, callStatus, conversations, setSearchParams]);
+  }, [
+    isDedicatedCallTab,
+    searchParams,
+    activeConvId,
+    activePeer,
+    isLoadingList,
+    callStatus,
+    conversations,
+    setSearchParams,
+  ]);
 
-  // Accept an incoming call
-  async function acceptIncomingCall(overrideCallData = null) {
+  // Accept an incoming call (opens in a separate tab when clicked from normal chat view)
+  async function acceptIncomingCall(overrideCallData = null, options = {}) {
     const callData = overrideCallData || incomingCallData;
     const targetConvId = callData?.conversationId || activeConvId;
     if (!targetConvId) return;
 
+    const mode = callData?.mode || 'video';
+    const callIdToUse = callData?.callId || activeCallIdRef.current || '';
+
+    if (!isDedicatedCallTab && !options.runInCurrentTab) {
+      const openedInNewTab = openCallInNewTab(targetConvId, mode, 'accept', callIdToUse);
+      if (openedInNewTab) {
+        return;
+      }
+      // If pop-up was blocked, fall through and accept the call in the current tab
+    }
+
     try {
-      const mode = callData?.mode || 'video';
-      activeCallIdRef.current = callData?.callId || `call_${targetConvId}_${Date.now()}`;
+      activeCallIdRef.current = callIdToUse || `call_${targetConvId}_${Date.now()}`;
 
       setCallMode(mode);
       setCallStatus('connecting');
@@ -1242,6 +1610,13 @@ export function Messages() {
         const latestSigRes = await getCallSignals(targetConvId, { sinceSeq: 0, since: Date.now() - 60000 }).catch(() => null);
         if (latestSigRes?.activeCall?.offer) {
           offerToUse = latestSigRes.activeCall.offer.offer || latestSigRes.activeCall.offer;
+          if (Array.isArray(latestSigRes.activeCall.candidates)) {
+            for (const c of latestSigRes.activeCall.candidates) {
+              if (c.from !== user?.id && c.candidate) {
+                candidateQueueRef.current.push(c.candidate);
+              }
+            }
+          }
         } else if (Array.isArray(latestSigRes?.signals)) {
           const offerSig = [...latestSigRes.signals].reverse().find((s) => s.type === 'offer');
           if (offerSig) {
@@ -1830,18 +2205,17 @@ export function Messages() {
     }
     cleanupCall();
     cancelVoiceRecording();
+    clearPendingAttachment();
+    setBookingSkillWarning(null);
+    setCallTabOpenedNotice(null);
+    setPopupBlockedNotice(null);
     setActiveConvId(conv.id);
     setActivePeer(conv.peer);
     setSearchParams({ conversationId: String(conv.id) });
   }
 
-  // Format call duration MM:SS
-  const formatDuration = (totalSec) => {
-    const safeSec = Math.max(0, Math.floor(Number(totalSec) || 0));
-    const mins = Math.floor(safeSec / 60);
-    const secs = safeSec % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
+  // Format call duration as "Xm Ys" (e.g., "2m 25s")
+  const formatDuration = (totalSec) => formatCallDurationHuman(totalSec);
 
   if (!isAuthenticated) {
     return (
@@ -1860,193 +2234,258 @@ export function Messages() {
     );
   }
 
-  return (
-    <div className="page" style={{ maxWidth: '1100px', height: 'calc(100vh - 120px)', display: 'flex', flexDirection: 'column' }}>
-      <div className="page-header" style={{ marginBottom: '1rem' }}>
-        <h1 className="page-title">Messages & Peer Connections</h1>
-        <p className="page-subtitle">
-          Secure, direct communication with qualified mentors and peer learners. Text, attachments, voice notes, and direct in-website calls.
-        </p>
-      </div>
-
-      {errorMessage && <ErrorState message={errorMessage} onRetry={() => setErrorMessage(null)} />}
-
+  const renderParticipantAvatar = (participant, size = 40, borderColor = 'rgba(99, 102, 241, 0.4)') => {
+    const name = participant?.name || 'Participant';
+    const avatarUrl = participant?.avatar_url;
+    return (
       <div
-        className="card"
         style={{
-          flex: 1,
-          padding: 0,
-          display: 'grid',
-          gridTemplateColumns: '320px 1fr',
+          width: `${size}px`,
+          height: `${size}px`,
+          borderRadius: '50%',
+          backgroundColor: 'rgba(99, 102, 241, 0.25)',
+          border: `2px solid ${borderColor}`,
+          color: '#c7d2fe',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontWeight: '700',
+          fontSize: `${Math.max(12, Math.round(size * 0.4))}px`,
+          flexShrink: 0,
           overflow: 'hidden',
-          borderRadius: 'var(--radius-lg)',
-          border: '1px solid var(--color-border)',
           position: 'relative',
         }}
       >
-        {/* Left Column: Conversations List */}
-        <div
-          style={{
-            borderRight: '1px solid var(--color-border)',
-            display: 'flex',
-            flexDirection: 'column',
-            backgroundColor: 'var(--color-bg-secondary)',
-            height: '100%',
-          }}
-        >
+        <span>{name.charAt(0).toUpperCase()}</span>
+        {avatarUrl && (
+          <img
+            src={avatarUrl}
+            alt={name}
+            style={{
+              position: 'absolute',
+              inset: 0,
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+            }}
+            onError={(e) => {
+              e.currentTarget.style.display = 'none';
+            }}
+          />
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div
+      className={isDedicatedCallTab ? '' : 'page'}
+      style={
+        isDedicatedCallTab
+          ? {
+              width: '100vw',
+              height: '100vh',
+              maxWidth: 'none',
+              margin: 0,
+              padding: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              backgroundColor: '#020617',
+              overflow: 'hidden',
+            }
+          : {
+              maxWidth: '1100px',
+              height: 'calc(100vh - 120px)',
+              display: 'flex',
+              flexDirection: 'column',
+            }
+      }
+    >
+      {!isDedicatedCallTab && (
+        <div className="page-header" style={{ marginBottom: '1rem' }}>
+          <h1 className="page-title">Messages & Peer Connections</h1>
+          <p className="page-subtitle">
+            Secure, direct communication with qualified mentors and peer learners. Text, attachments, voice notes, and live calls.
+          </p>
+        </div>
+      )}
+
+      {!isDedicatedCallTab && errorMessage && (
+        <ErrorState message={errorMessage} onRetry={() => setErrorMessage(null)} />
+      )}
+
+      <div
+        className={isDedicatedCallTab ? '' : 'card'}
+        style={{
+          flex: 1,
+          minHeight: 0,
+          padding: 0,
+          display: 'grid',
+          gridTemplateColumns: isDedicatedCallTab ? '1fr' : '320px 1fr',
+          overflow: 'hidden',
+          borderRadius: isDedicatedCallTab ? 0 : 'var(--radius-lg)',
+          border: isDedicatedCallTab ? 'none' : '1px solid var(--color-border)',
+          position: 'relative',
+        }}
+      >
+        {/* Left Column: Conversations List (hidden in dedicated call tab) */}
+        {!isDedicatedCallTab && (
           <div
             style={{
-              padding: '1rem',
-              borderBottom: '1px solid var(--color-border)',
+              borderRight: '1px solid var(--color-border)',
               display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
+              flexDirection: 'column',
+              backgroundColor: 'var(--color-bg-secondary)',
+              height: '100%',
+              minHeight: 0,
             }}
           >
-            <span style={{ fontWeight: '700', fontSize: '0.95rem', color: 'var(--color-text-primary)' }}>
-              Conversations ({conversations.length})
-            </span>
-          </div>
+            <div
+              style={{
+                padding: '1rem',
+                borderBottom: '1px solid var(--color-border)',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+              }}
+            >
+              <span style={{ fontWeight: '700', fontSize: '0.95rem', color: 'var(--color-text-primary)' }}>
+                Conversations ({conversations.length})
+              </span>
+            </div>
 
-          <div style={{ flex: 1, overflowY: 'auto' }}>
-            {isLoadingList ? (
-              <div style={{ padding: '2rem' }}>
-                <Loader message="Loading chats..." />
-              </div>
-            ) : conversations.length === 0 ? (
-              <div style={{ padding: '1.5rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>
-                <p style={{ fontSize: '0.88rem', marginBottom: '0.75rem' }}>No active conversations yet.</p>
-                <p style={{ fontSize: '0.8rem' }}>Browse courses or mentors to message a peer.</p>
-              </div>
-            ) : (
-              conversations.map((conv) => {
-                const isActive = conv.id === activeConvId;
-                const peer = conv.peer || { name: 'Peer' };
-                const peerAvatar = peer.avatar_url;
+            <div style={{ flex: 1, overflowY: 'auto' }}>
+              {isLoadingList ? (
+                <div style={{ padding: '2rem' }}>
+                  <Loader message="Loading chats..." />
+                </div>
+              ) : conversations.length === 0 ? (
+                <div style={{ padding: '1.5rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                  <p style={{ fontSize: '0.88rem', marginBottom: '0.75rem' }}>No active conversations yet.</p>
+                  <p style={{ fontSize: '0.8rem' }}>Browse courses or mentors to message a peer.</p>
+                </div>
+              ) : (
+                conversations.map((conv) => {
+                  const isActive = String(conv.id) === String(activeConvId);
+                  const peer = conv.peer || { name: 'Peer' };
 
-                return (
-                  <div
-                    key={conv.id}
-                    onClick={() => selectConversation(conv)}
-                    style={{
-                      padding: '0.85rem 1rem',
-                      cursor: 'pointer',
-                      borderBottom: '1px solid var(--color-border-subtle)',
-                      backgroundColor: isActive ? 'rgba(79, 70, 229, 0.15)' : 'transparent',
-                      borderLeft: isActive ? '3px solid var(--color-primary)' : '3px solid transparent',
-                      transition: 'background-color 0.15s ease',
-                      display: 'flex',
-                      gap: '0.75rem',
-                      alignItems: 'center',
-                    }}
-                  >
-                    {peerAvatar ? (
-                      <img
-                        src={peerAvatar}
-                        alt={peer.name}
-                        style={{ width: '40px', height: '40px', borderRadius: '50%', objectFit: 'cover' }}
-                        onError={(e) => { e.target.style.display = 'none'; }}
-                      />
-                    ) : (
-                      <div
-                        style={{
-                          width: '40px',
-                          height: '40px',
-                          borderRadius: '50%',
-                          backgroundColor: 'rgba(99, 102, 241, 0.25)',
-                          color: '#818cf8',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          fontWeight: '700',
-                          fontSize: '0.95rem',
-                          flexShrink: 0,
-                        }}
-                      >
-                        {(peer.name || 'P').charAt(0).toUpperCase()}
-                      </div>
-                    )}
+                  return (
+                    <div
+                      key={conv.id}
+                      onClick={() => selectConversation(conv)}
+                      style={{
+                        padding: '0.85rem 1rem',
+                        cursor: 'pointer',
+                        borderBottom: '1px solid var(--color-border-subtle)',
+                        backgroundColor: isActive ? 'rgba(79, 70, 229, 0.15)' : 'transparent',
+                        borderLeft: isActive ? '3px solid var(--color-primary)' : '3px solid transparent',
+                        transition: 'background-color 0.15s ease',
+                        display: 'flex',
+                        gap: '0.75rem',
+                        alignItems: 'center',
+                      }}
+                    >
+                      {renderParticipantAvatar(peer, 40)}
 
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', overflow: 'hidden' }}>
-                          <span style={{ fontWeight: '600', fontSize: '0.9rem', color: 'var(--color-text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                            {peer.name}
-                          </span>
-                          {peer.is_demo && (
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', overflow: 'hidden' }}>
                             <span
                               style={{
-                                fontSize: '0.65rem',
-                                padding: '0.1rem 0.35rem',
-                                borderRadius: '4px',
-                                backgroundColor: 'rgba(99, 102, 241, 0.2)',
-                                color: '#a5b4fc',
+                                fontWeight: '600',
+                                fontSize: '0.9rem',
+                                color: 'var(--color-text-primary)',
+                                whiteSpace: 'nowrap',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
                               }}
                             >
-                              Demo
+                              {peer.name}
                             </span>
-                          )}
-                          {conv.is_closed && (
+                            {peer.is_demo && (
+                              <span
+                                style={{
+                                  fontSize: '0.65rem',
+                                  padding: '0.1rem 0.35rem',
+                                  borderRadius: '4px',
+                                  backgroundColor: 'rgba(99, 102, 241, 0.2)',
+                                  color: '#a5b4fc',
+                                }}
+                              >
+                                Demo
+                              </span>
+                            )}
+                            {conv.is_closed && (
+                              <span
+                                style={{
+                                  fontSize: '0.65rem',
+                                  padding: '0.1rem 0.35rem',
+                                  borderRadius: '4px',
+                                  backgroundColor: 'rgba(239, 68, 68, 0.15)',
+                                  color: '#f87171',
+                                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                                }}
+                              >
+                                Closed
+                              </span>
+                            )}
+                          </div>
+                          {conv.unread_count > 0 && (
                             <span
                               style={{
-                                fontSize: '0.65rem',
-                                padding: '0.1rem 0.35rem',
-                                borderRadius: '4px',
-                                backgroundColor: 'rgba(239, 68, 68, 0.15)',
-                                color: '#f87171',
-                                border: '1px solid rgba(239, 68, 68, 0.3)',
+                                backgroundColor: 'var(--color-primary)',
+                                color: '#fff',
+                                fontSize: '0.7rem',
+                                fontWeight: '700',
+                                padding: '0.1rem 0.45rem',
+                                borderRadius: '9999px',
                               }}
                             >
-                              Closed
+                              {conv.unread_count}
                             </span>
                           )}
                         </div>
-                        {conv.unread_count > 0 && (
-                          <span
-                            style={{
-                              backgroundColor: 'var(--color-primary)',
-                              color: '#fff',
-                              fontSize: '0.7rem',
-                              fontWeight: '700',
-                              padding: '0.1rem 0.45rem',
-                              borderRadius: '9999px',
-                            }}
-                          >
-                            {conv.unread_count}
-                          </span>
-                        )}
+
+                        <p
+                          style={{
+                            fontSize: '0.8rem',
+                            color: 'var(--color-text-muted)',
+                            margin: '0.2rem 0 0',
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                          }}
+                        >
+                          {conv.last_message_content || 'No messages yet'}
+                        </p>
                       </div>
-
-                      <p
-                        style={{
-                          fontSize: '0.8rem',
-                          color: 'var(--color-text-muted)',
-                          margin: '0.2rem 0 0',
-                          whiteSpace: 'nowrap',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                        }}
-                      >
-                        {conv.last_message_content || 'No messages yet'}
-                      </p>
                     </div>
-                  </div>
-                );
-              })
-            )}
+                  );
+                })
+              )}
+            </div>
           </div>
-        </div>
+        )}
 
-        {/* Right Column: Chat Thread */}
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', backgroundColor: 'var(--color-bg)', position: 'relative' }}>
+        {/* Right Column: Chat Thread & Call Surface */}
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            height: '100%',
+            minHeight: 0,
+            backgroundColor: isDedicatedCallTab ? '#020617' : 'var(--color-bg)',
+            position: 'relative',
+          }}
+        >
           {activeConvId && activePeer ? (
             (() => {
               const activeConv = conversations.find((c) => String(c.id) === String(activeConvId));
-              const isAcceptedSession = activeConv?.session_status && ['accepted', 'confirmed'].includes(activeConv.session_status);
+              const canStartCall = !activeConv?.is_closed;
 
               return (
                 <>
-                  {/* Thread Header with Call Triggers */}
+                  {/* Thread Header with Call & Booking Triggers */}
                   <div
                     style={{
                       padding: '0.85rem 1.25rem',
@@ -2055,35 +2494,14 @@ export function Messages() {
                       justifyContent: 'space-between',
                       alignItems: 'center',
                       backgroundColor: 'var(--color-bg-secondary)',
+                      flexWrap: 'wrap',
+                      gap: '0.75rem',
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                      {activePeer.avatar_url ? (
-                        <img
-                          src={activePeer.avatar_url}
-                          alt={activePeer.name}
-                          style={{ width: '40px', height: '40px', borderRadius: '50%', objectFit: 'cover' }}
-                          onError={(e) => { e.target.style.display = 'none'; }}
-                        />
-                      ) : (
-                        <div
-                          style={{
-                            width: '40px',
-                            height: '40px',
-                            borderRadius: '50%',
-                            backgroundColor: 'rgba(99, 102, 241, 0.25)',
-                            color: '#818cf8',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            fontWeight: '700',
-                          }}
-                        >
-                          {(activePeer.name || 'P').charAt(0).toUpperCase()}
-                        </div>
-                      )}
+                      {renderParticipantAvatar(activePeer, 40)}
                       <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap' }}>
                           <span style={{ fontWeight: '700', fontSize: '1rem', color: 'var(--color-text-primary)' }}>
                             {activePeer.name}
                           </span>
@@ -2130,34 +2548,27 @@ export function Messages() {
                         <span style={{ fontSize: '0.78rem', color: 'var(--color-text-muted)' }}>
                           {activeConv?.session_status
                             ? `Session: ${activeConv.session_status}`
-                            : (activePeer.role || 'Peer Member')}
+                            : activePeer.role || 'Peer Member'}
                         </span>
                       </div>
                     </div>
 
-                    {/* Actions: Direct Calls & Session Booking */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                      {/* WebRTC Audio & Video Calling Buttons */}
-                      {!activeConv?.is_closed && (
+                    {/* Actions: Direct Calls (opens in new tab) & Verified Session Booking */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      {canStartCall && (
                         <>
                           <button
                             type="button"
                             className="btn btn-sm btn-outline"
-                            title={
-                              isAcceptedSession
-                                ? 'Start direct audio call with peer'
-                                : 'Direct calling requires an accepted session'
-                            }
+                            title="Start audio call in a separate tab"
                             onClick={() => initiateCall('audio')}
-                            disabled={
-                              !isAcceptedSession ||
-                              ['outgoing', 'incoming', 'connecting', 'connected', 'disconnected'].includes(callStatus)
-                            }
+                            disabled={['outgoing', 'incoming', 'connecting', 'connected', 'disconnected'].includes(
+                              callStatus
+                            )}
                             style={{
                               display: 'flex',
                               alignItems: 'center',
                               gap: '0.35rem',
-                              opacity: isAcceptedSession ? 1 : 0.5,
                             }}
                           >
                             <PhoneIcon size={15} />
@@ -2166,21 +2577,15 @@ export function Messages() {
                           <button
                             type="button"
                             className="btn btn-sm btn-primary"
-                            title={
-                              isAcceptedSession
-                                ? 'Start direct video call with peer'
-                                : 'Direct calling requires an accepted session'
-                            }
+                            title="Start video call in a separate tab"
                             onClick={() => initiateCall('video')}
-                            disabled={
-                              !isAcceptedSession ||
-                              ['outgoing', 'incoming', 'connecting', 'connected', 'disconnected'].includes(callStatus)
-                            }
+                            disabled={['outgoing', 'incoming', 'connecting', 'connected', 'disconnected'].includes(
+                              callStatus
+                            )}
                             style={{
                               display: 'flex',
                               alignItems: 'center',
                               gap: '0.35rem',
-                              opacity: isAcceptedSession ? 1 : 0.5,
                             }}
                           >
                             <VideoIcon size={15} />
@@ -2203,16 +2608,135 @@ export function Messages() {
                         </>
                       )}
 
-                      {isLearner && !activeConv?.is_closed && !activeConv?.session_id && (
-                        <Link
-                          to={`/booking?mentorId=${encodeURIComponent(activePeer.id)}&mentorName=${encodeURIComponent(activePeer.name)}`}
+                      {isLearner && !activeConv?.is_closed && (
+                        <button
+                          type="button"
+                          onClick={handleBookSessionFromChat}
+                          disabled={isLoadingPeerSkills}
                           className="btn btn-sm btn-outline"
+                          title="Book a 1-on-1 learning session with this mentor"
                         >
-                          Book Session
-                        </Link>
+                          {isLoadingPeerSkills ? 'Checking skills...' : 'Book Session'}
+                        </button>
                       )}
                     </div>
                   </div>
+
+                  {/* Unverified / No Verified Skills Warning Banner when clicking Book Session */}
+                  {bookingSkillWarning && (
+                    <div
+                      role="alert"
+                      style={{
+                        padding: '0.75rem 1.25rem',
+                        backgroundColor: 'rgba(245, 158, 11, 0.14)',
+                        borderBottom: '1px solid rgba(245, 158, 11, 0.35)',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: '1rem',
+                        fontSize: '0.85rem',
+                        color: 'var(--color-text-primary)',
+                      }}
+                    >
+                      <span>⚠️ {bookingSkillWarning}</span>
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-outline"
+                        onClick={() => setBookingSkillWarning(null)}
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Call Opened in Separate Tab Confirmation Banner */}
+                  {callTabOpenedNotice && (
+                    <div
+                      style={{
+                        padding: '0.65rem 1.25rem',
+                        backgroundColor: 'rgba(16, 185, 129, 0.14)',
+                        borderBottom: '1px solid rgba(16, 185, 129, 0.35)',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: '1rem',
+                        fontSize: '0.84rem',
+                        color: 'var(--color-text-primary)',
+                      }}
+                    >
+                      <span>
+                        📞 <strong>{callTabOpenedNotice.mode === 'audio' ? 'Audio' : 'Video'} call</strong> with{' '}
+                        <strong>{callTabOpenedNotice.peerName}</strong> opened in a separate browser tab so you can keep
+                        browsing SkillExchange here.
+                      </span>
+                      <div style={{ display: 'flex', gap: '0.5rem', flexShrink: 0 }}>
+                        <a
+                          href={callTabOpenedNotice.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="btn btn-sm btn-primary"
+                        >
+                          Open Call Tab
+                        </a>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline"
+                          onClick={() => setCallTabOpenedNotice(null)}
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Pop-up Blocked Fallback Banner */}
+                  {popupBlockedNotice && (
+                    <div
+                      role="alert"
+                      style={{
+                        padding: '0.75rem 1.25rem',
+                        backgroundColor: 'rgba(245, 158, 11, 0.16)',
+                        borderBottom: '1px solid rgba(245, 158, 11, 0.4)',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: '1rem',
+                        flexWrap: 'wrap',
+                        fontSize: '0.85rem',
+                      }}
+                    >
+                      <span>
+                        ⚠️ Your browser blocked opening the call tab automatically. Click <strong>Open Call Tab</strong>{' '}
+                        to launch the full-page call in a new tab.
+                      </span>
+                      <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        <a
+                          href={popupBlockedNotice.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="btn btn-sm btn-primary"
+                          onClick={() => setPopupBlockedNotice(null)}
+                        >
+                          Open Call Tab ↗
+                        </a>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline"
+                          onClick={() => {
+                            const { mode, action } = popupBlockedNotice;
+                            setPopupBlockedNotice(null);
+                            if (action === 'accept') {
+                              acceptIncomingCall({ forceInPlace: true });
+                            } else {
+                              initiateCall(mode || 'video', { forceInPlace: true });
+                            }
+                          }}
+                        >
+                          Start Here Instead
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Cross-conversation Incoming Call Alert Banner */}
                   {otherConvIncomingCall && (
@@ -2230,8 +2754,8 @@ export function Messages() {
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', fontSize: '0.88rem' }}>
                         <PhoneIcon size={16} style={{ color: 'var(--color-primary)' }} />
                         <span>
-                          <strong>{otherConvIncomingCall.callerName || 'A participant'}</strong> is calling you in another session thread (
-                          {otherConvIncomingCall.mode === 'audio' ? 'Audio Call' : 'Video Call'}).
+                          <strong>{otherConvIncomingCall.callerName || 'A participant'}</strong> is calling you in another
+                          session thread ({otherConvIncomingCall.mode === 'audio' ? 'Audio Call' : 'Video Call'}).
                         </span>
                       </div>
                       <div style={{ display: 'flex', gap: '0.5rem' }}>
@@ -2278,12 +2802,20 @@ export function Messages() {
                     >
                       <div>
                         <strong>Direct Peer WebRTC Calling:</strong> Uses browser RTCPeerConnection with STUN servers (
-                        {hasTurnConfigured ? 'TURN relay configured' : 'STUN-only mode; configure TURN_SERVER_URL in backend/.env for restrictive firewalls'}). Outside localhost, HTTPS is required for camera/microphone access.
+                        {hasTurnConfigured
+                          ? 'TURN relay configured'
+                          : 'STUN-only mode; configure TURN_SERVER_URL in backend/.env for restrictive firewalls'}
+                        ). Outside localhost, HTTPS is required for camera/microphone access.
                       </div>
                       <button
                         type="button"
                         onClick={() => setShowNetworkInfo(false)}
-                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)' }}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          cursor: 'pointer',
+                          color: 'var(--color-text-muted)',
+                        }}
                       >
                         <CloseIcon size={14} />
                       </button>
@@ -2296,9 +2828,7 @@ export function Messages() {
                       style={{
                         padding: '0.85rem 1.25rem',
                         backgroundColor:
-                          callStatus === 'failed'
-                            ? 'rgba(239, 68, 68, 0.14)'
-                            : 'rgba(245, 158, 11, 0.14)',
+                          callStatus === 'failed' ? 'rgba(239, 68, 68, 0.14)' : 'rgba(245, 158, 11, 0.14)',
                         borderBottom:
                           callStatus === 'failed'
                             ? '1px solid rgba(239, 68, 68, 0.35)'
@@ -2334,20 +2864,16 @@ export function Messages() {
                         </div>
                       </div>
                       <div style={{ display: 'flex', gap: '0.5rem' }}>
-                        {isAcceptedSession && !activeConv?.is_closed && (
+                        {!activeConv?.is_closed && (
                           <button
                             type="button"
                             className="btn btn-sm btn-primary"
-                            onClick={() => initiateCall(callMode)}
+                            onClick={() => initiateCall(callMode, { forceInPlace: isDedicatedCallTab })}
                           >
                             Call Again
                           </button>
                         )}
-                        <button
-                          type="button"
-                          className="btn btn-sm btn-outline"
-                          onClick={cleanupCall}
-                        >
+                        <button type="button" className="btn btn-sm btn-outline" onClick={cleanupCall}>
                           Dismiss
                         </button>
                       </div>
@@ -2367,7 +2893,10 @@ export function Messages() {
                         gap: '0.5rem',
                       }}
                     >
-                      <span>🔒 This session coordination thread is closed because the booking was declined. Message history is preserved.</span>
+                      <span>
+                        🔒 This session coordination thread is closed because the booking was declined. Message history is
+                        preserved.
+                      </span>
                     </div>
                   )}
 
@@ -2375,11 +2904,12 @@ export function Messages() {
                   <div
                     style={{
                       flex: 1,
+                      minHeight: 0,
                       padding: '1.25rem',
                       overflowY: 'auto',
                       display: 'flex',
                       flexDirection: 'column',
-                      gap: '0.85rem',
+                      gap: '0.45rem',
                     }}
                   >
                     {isLoadingMessages ? (
@@ -2391,201 +2921,380 @@ export function Messages() {
                         <p style={{ fontSize: '0.82rem' }}>Say hello, share session materials, or start a call!</p>
                       </div>
                     ) : (
-                      messages.map((msg) => {
+                      messages.map((msg, idx) => {
+                        const prevMsg = idx > 0 ? messages[idx - 1] : null;
+                        const showGroupTime = shouldShowGroupTimestamp(msg, prevMsg);
+                        const groupTimeStr = showGroupTime
+                          ? formatGroupTimestamp(msg.created_at, prevMsg?.created_at)
+                          : '';
                         const isMine = msg.sender_id === user?.id;
-                        const timeStr = new Date(msg.created_at).toLocaleTimeString([], {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        });
-                        const attachmentStreamUrl = `/api/conversations/${activeConvId}/attachments/${msg.id}?token=${encodeURIComponent(token)}`;
+                        const isSameSenderAsPrev =
+                          !showGroupTime &&
+                          prevMsg &&
+                          prevMsg.message_type !== 'call_log' &&
+                          String(prevMsg.sender_id) === String(msg.sender_id);
+                        const attachmentStreamUrl = `/api/conversations/${activeConvId}/attachments/${msg.id}?token=${encodeURIComponent(
+                          token
+                        )}`;
                         const attachmentDownloadUrl = `${attachmentStreamUrl}&download=1`;
 
-                        // Call log system message
-                        if (msg.message_type === 'call_log') {
-                          const isNegativeLog =
-                            msg.call_action === 'declined' ||
-                            msg.call_action === 'missed' ||
-                            msg.call_action === 'failed';
-                          return (
-                            <div
-                              key={msg.id}
-                              style={{
-                                alignSelf: 'center',
-                                padding: '0.35rem 0.85rem',
-                                borderRadius: '9999px',
-                                backgroundColor: isNegativeLog
-                                  ? 'rgba(239, 68, 68, 0.1)'
-                                  : 'var(--color-bg-secondary)',
-                                border: isNegativeLog
-                                  ? '1px solid rgba(239, 68, 68, 0.3)'
-                                  : '1px solid var(--color-border)',
-                                fontSize: '0.78rem',
-                                color: isNegativeLog ? '#f87171' : 'var(--color-text-secondary)',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '0.4rem',
-                                margin: '0.25rem 0',
-                              }}
-                            >
-                              {isNegativeLog ? (
-                                <PhoneOffIcon size={13} style={{ color: '#ef4444' }} />
-                              ) : (
-                                <PhoneIcon size={13} style={{ color: 'var(--color-primary)' }} />
-                              )}
-                              <span>{msg.content}</span>
-                              <span style={{ color: 'var(--color-text-muted)', fontSize: '0.7rem' }}>• {timeStr}</span>
-                            </div>
-                          );
-                        }
-
-                        // Attachment or Voice Note or Regular Message
                         return (
-                          <div
-                            key={msg.id}
-                            style={{
-                              display: 'flex',
-                              flexDirection: 'column',
-                              alignItems: isMine ? 'flex-end' : 'flex-start',
-                              maxWidth: '75%',
-                              alignSelf: isMine ? 'flex-end' : 'flex-start',
-                            }}
-                          >
-                            <div
-                              style={{
-                                padding: '0.75rem 1rem',
-                                borderRadius: '16px',
-                                borderBottomRightRadius: isMine ? '4px' : '16px',
-                                borderBottomLeftRadius: isMine ? '16px' : '4px',
-                                backgroundColor: isMine ? 'var(--color-primary)' : 'var(--color-bg-secondary)',
-                                color: isMine ? '#ffffff' : 'var(--color-text-primary)',
-                                fontSize: '0.92rem',
-                                lineHeight: 1.45,
-                                border: isMine ? 'none' : '1px solid var(--color-border)',
-                                wordBreak: 'break-word',
-                              }}
-                            >
-                              {/* 1. Voice Note Message */}
-                              {msg.message_type === 'voice' && msg.attachment_filename && (
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem', minWidth: '230px' }}>
-                                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', fontSize: '0.8rem', opacity: 0.92 }}>
-                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', fontWeight: '600' }}>
-                                      <MicIcon size={14} />
-                                      <span>Voice Note {msg.duration_seconds ? `(${formatDuration(msg.duration_seconds)})` : ''}</span>
-                                    </span>
-                                    <a
-                                      href={attachmentDownloadUrl}
-                                      download={msg.attachment_original_name || 'voice_note.webm'}
-                                      style={{
-                                        color: isMine ? '#ffffff' : 'var(--color-primary)',
-                                        display: 'inline-flex',
-                                        alignItems: 'center',
-                                        opacity: 0.85,
-                                      }}
-                                      title="Download voice note"
-                                    >
-                                      <DownloadIcon size={13} />
-                                    </a>
-                                  </div>
-                                  <audio
-                                    controls
-                                    preload="metadata"
-                                    src={attachmentStreamUrl}
-                                    style={{ width: '250px', maxWidth: '100%', height: '38px' }}
-                                  />
-                                </div>
-                              )}
+                          <React.Fragment key={msg.id || `${msg.created_at}-${idx}`}>
+                            {/* Grouped Timestamp Divider (shown once at the start of a group or after >5m gap / date change) */}
+                            {showGroupTime && groupTimeStr && (
+                              <div
+                                style={{
+                                  alignSelf: 'center',
+                                  margin: idx === 0 ? '0.15rem 0 0.45rem' : '0.75rem 0 0.35rem',
+                                  padding: '0.2rem 0.7rem',
+                                  borderRadius: '9999px',
+                                  backgroundColor: 'var(--color-bg-secondary)',
+                                  border: '1px solid var(--color-border-subtle)',
+                                  fontSize: '0.72rem',
+                                  fontWeight: '600',
+                                  color: 'var(--color-text-muted)',
+                                }}
+                              >
+                                {groupTimeStr}
+                              </div>
+                            )}
 
-                              {/* 2. Document or Image Attachment */}
-                              {msg.message_type === 'attachment' && msg.attachment_filename && (
-                                <div>
-                                  {msg.attachment_mimetype?.startsWith('image/') ? (
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                                      <a href={attachmentStreamUrl} target="_blank" rel="noopener noreferrer">
-                                        <img
-                                          src={attachmentStreamUrl}
-                                          alt={msg.attachment_original_name || 'Attachment'}
-                                          style={{
-                                            maxWidth: '280px',
-                                            maxHeight: '220px',
-                                            borderRadius: '8px',
-                                            objectFit: 'cover',
-                                            display: 'block',
-                                          }}
-                                        />
-                                      </a>
-                                      <a
-                                        href={attachmentDownloadUrl}
-                                        download={msg.attachment_original_name}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
+                            {/* Call log event pill */}
+                            {msg.message_type === 'call_log' ? (
+                              <div
+                                style={{
+                                  alignSelf: 'center',
+                                  padding: '0.35rem 0.85rem',
+                                  borderRadius: '9999px',
+                                  backgroundColor:
+                                    msg.call_action === 'declined' ||
+                                    msg.call_action === 'missed' ||
+                                    msg.call_action === 'failed'
+                                      ? 'rgba(239, 68, 68, 0.1)'
+                                      : 'var(--color-bg-secondary)',
+                                  border:
+                                    msg.call_action === 'declined' ||
+                                    msg.call_action === 'missed' ||
+                                    msg.call_action === 'failed'
+                                      ? '1px solid rgba(239, 68, 68, 0.3)'
+                                      : '1px solid var(--color-border)',
+                                  fontSize: '0.78rem',
+                                  color:
+                                    msg.call_action === 'declined' ||
+                                    msg.call_action === 'missed' ||
+                                    msg.call_action === 'failed'
+                                      ? '#f87171'
+                                      : 'var(--color-text-secondary)',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: '0.4rem',
+                                  margin: '0.25rem 0',
+                                }}
+                              >
+                                {msg.call_action === 'declined' ||
+                                msg.call_action === 'missed' ||
+                                msg.call_action === 'failed' ? (
+                                  <PhoneOffIcon size={13} style={{ color: '#ef4444' }} />
+                                ) : (
+                                  <PhoneIcon size={13} style={{ color: 'var(--color-primary)' }} />
+                                )}
+                                <span>{formatCallLogContent(msg)}</span>
+                              </div>
+                            ) : (
+                              /* Participant Message Bubble (Text, Attachment, or Voice Note) */
+                              <div
+                                style={{
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  alignItems: isMine ? 'flex-end' : 'flex-start',
+                                  maxWidth: '75%',
+                                  alignSelf: isMine ? 'flex-end' : 'flex-start',
+                                  marginTop: isSameSenderAsPrev ? '0.1rem' : '0.35rem',
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    padding: '0.75rem 1rem',
+                                    borderRadius: '16px',
+                                    borderBottomRightRadius: isMine ? '4px' : '16px',
+                                    borderBottomLeftRadius: isMine ? '16px' : '4px',
+                                    backgroundColor: isMine ? 'var(--color-primary)' : 'var(--color-bg-secondary)',
+                                    color: isMine ? '#ffffff' : 'var(--color-text-primary)',
+                                    fontSize: '0.92rem',
+                                    lineHeight: 1.45,
+                                    border: isMine ? 'none' : '1px solid var(--color-border)',
+                                    wordBreak: 'break-word',
+                                  }}
+                                >
+                                  {/* 1. Voice Note Message */}
+                                  {msg.message_type === 'voice' && msg.attachment_filename && (
+                                    <div
+                                      style={{
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        gap: '0.45rem',
+                                        minWidth: '230px',
+                                      }}
+                                    >
+                                      <div
                                         style={{
-                                          color: isMine ? '#ffffff' : 'var(--color-primary)',
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          justifyContent: 'space-between',
+                                          gap: '0.5rem',
                                           fontSize: '0.8rem',
-                                          display: 'flex',
-                                          alignItems: 'center',
-                                          gap: '0.35rem',
-                                          textDecoration: 'underline',
+                                          opacity: 0.92,
                                         }}
                                       >
-                                        <DownloadIcon size={13} />
-                                        <span>Download {msg.attachment_original_name}</span>
-                                      </a>
-                                    </div>
-                                  ) : (
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
-                                      <FileTextIcon size={24} style={{ flexShrink: 0 }} />
-                                      <div style={{ flex: 1, minWidth: 0 }}>
-                                        <div style={{ fontWeight: '600', fontSize: '0.88rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                          {msg.attachment_original_name || 'Document'}
-                                        </div>
-                                        {msg.attachment_size && (
-                                          <div style={{ fontSize: '0.72rem', opacity: 0.8 }}>
-                                            {(msg.attachment_size / 1024).toFixed(1)} KB
-                                          </div>
-                                        )}
+                                        <span
+                                          style={{
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: '0.35rem',
+                                            fontWeight: '600',
+                                          }}
+                                        >
+                                          <MicIcon size={14} />
+                                          <span>
+                                            Voice Note{' '}
+                                            {msg.duration_seconds ? `(${formatDuration(msg.duration_seconds)})` : ''}
+                                          </span>
+                                        </span>
+                                        <a
+                                          href={attachmentDownloadUrl}
+                                          download={msg.attachment_original_name || 'voice_note.webm'}
+                                          style={{
+                                            color: isMine ? '#ffffff' : 'var(--color-primary)',
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            opacity: 0.85,
+                                          }}
+                                          title="Download voice note"
+                                        >
+                                          <DownloadIcon size={13} />
+                                        </a>
                                       </div>
-                                      <a
-                                        href={attachmentDownloadUrl}
-                                        download={msg.attachment_original_name}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        style={{
-                                          color: isMine ? '#ffffff' : 'var(--color-primary)',
-                                          padding: '0.35rem',
-                                          borderRadius: '4px',
-                                          display: 'flex',
-                                          alignItems: 'center',
-                                        }}
-                                        title="Download document"
-                                      >
-                                        <DownloadIcon size={16} />
-                                      </a>
+                                      <audio
+                                        controls
+                                        preload="metadata"
+                                        src={attachmentStreamUrl}
+                                        style={{ width: '250px', maxWidth: '100%', height: '38px' }}
+                                      />
                                     </div>
                                   )}
-                                </div>
-                              )}
 
-                              {/* 3. Regular Text Content */}
-                              {msg.message_type !== 'voice' && msg.message_type !== 'attachment' && (
-                                msg.content
-                              )}
-                            </div>
-                            <span
-                              style={{
-                                fontSize: '0.72rem',
-                                color: 'var(--color-text-muted)',
-                                marginTop: '0.2rem',
-                                padding: '0 0.25rem',
-                              }}
-                            >
-                              {timeStr}
-                            </span>
-                          </div>
+                                  {/* 2. Document or Image Attachment */}
+                                  {msg.message_type === 'attachment' && msg.attachment_filename && (
+                                    <div>
+                                      {msg.attachment_mimetype?.startsWith('image/') ? (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                                          <a href={attachmentStreamUrl} target="_blank" rel="noopener noreferrer">
+                                            <img
+                                              src={attachmentStreamUrl}
+                                              alt={msg.attachment_original_name || 'Attachment'}
+                                              style={{
+                                                maxWidth: '280px',
+                                                maxHeight: '220px',
+                                                borderRadius: '8px',
+                                                objectFit: 'cover',
+                                                display: 'block',
+                                              }}
+                                            />
+                                          </a>
+                                          <a
+                                            href={attachmentDownloadUrl}
+                                            download={msg.attachment_original_name}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            style={{
+                                              color: isMine ? '#ffffff' : 'var(--color-primary)',
+                                              fontSize: '0.8rem',
+                                              display: 'flex',
+                                              alignItems: 'center',
+                                              gap: '0.35rem',
+                                              textDecoration: 'underline',
+                                            }}
+                                          >
+                                            <DownloadIcon size={13} />
+                                            <span>Download {msg.attachment_original_name}</span>
+                                          </a>
+                                        </div>
+                                      ) : (
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                                          <FileTextIcon size={24} style={{ flexShrink: 0 }} />
+                                          <div style={{ flex: 1, minWidth: 0 }}>
+                                            <div
+                                              style={{
+                                                fontWeight: '600',
+                                                fontSize: '0.88rem',
+                                                overflow: 'hidden',
+                                                textOverflow: 'ellipsis',
+                                                whiteSpace: 'nowrap',
+                                              }}
+                                            >
+                                              {msg.attachment_original_name || 'Document'}
+                                            </div>
+                                            {msg.attachment_size && (
+                                              <div style={{ fontSize: '0.72rem', opacity: 0.8 }}>
+                                                {formatFileSize(msg.attachment_size)}
+                                              </div>
+                                            )}
+                                          </div>
+                                          <a
+                                            href={attachmentDownloadUrl}
+                                            download={msg.attachment_original_name}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            style={{
+                                              color: isMine ? '#ffffff' : 'var(--color-primary)',
+                                              padding: '0.35rem',
+                                              borderRadius: '4px',
+                                              display: 'flex',
+                                              alignItems: 'center',
+                                            }}
+                                            title="Download document"
+                                          >
+                                            <DownloadIcon size={16} />
+                                          </a>
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+
+                                  {/* 3. Regular Text Content */}
+                                  {msg.message_type !== 'voice' &&
+                                    msg.message_type !== 'attachment' &&
+                                    msg.content}
+                                </div>
+                              </div>
+                            )}
+                          </React.Fragment>
                         );
                       })
                     )}
                     <div ref={messagesEndRef} />
                   </div>
+
+                  {/* Pending Attachment Preview & Composer (staged before upload) */}
+                  {pendingAttachment && !isRecordingVoice && !voicePreview && (
+                    <div
+                      style={{
+                        padding: '0.85rem 1.25rem',
+                        borderTop: '1px solid var(--color-border)',
+                        backgroundColor: 'var(--color-bg-secondary)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '0.75rem',
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: '1rem',
+                          flexWrap: 'wrap',
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem', minWidth: 0, flex: 1 }}>
+                          {pendingAttachment.isImage && pendingAttachment.previewUrl ? (
+                            <img
+                              src={pendingAttachment.previewUrl}
+                              alt={pendingAttachment.name}
+                              style={{
+                                width: '64px',
+                                height: '64px',
+                                objectFit: 'cover',
+                                borderRadius: '8px',
+                                border: '1px solid var(--color-border)',
+                                flexShrink: 0,
+                              }}
+                            />
+                          ) : (
+                            <div
+                              style={{
+                                width: '48px',
+                                height: '48px',
+                                borderRadius: '10px',
+                                backgroundColor: 'rgba(37, 99, 235, 0.15)',
+                                color: 'var(--color-primary)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                flexShrink: 0,
+                              }}
+                            >
+                              <FileTextIcon size={24} />
+                            </div>
+                          )}
+
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap' }}>
+                              <span
+                                className="badge"
+                                style={{
+                                  fontSize: '0.68rem',
+                                  backgroundColor: 'rgba(37, 99, 235, 0.15)',
+                                  color: 'var(--color-primary)',
+                                  border: '1px solid rgba(37, 99, 235, 0.3)',
+                                }}
+                              >
+                                {pendingAttachment.typeLabel}
+                              </span>
+                              <span
+                                style={{
+                                  fontWeight: '600',
+                                  fontSize: '0.9rem',
+                                  color: 'var(--color-text-primary)',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                {pendingAttachment.name}
+                              </span>
+                            </div>
+                            <div style={{ fontSize: '0.78rem', color: 'var(--color-text-muted)', marginTop: '0.15rem' }}>
+                              {formatFileSize(pendingAttachment.size)} • Ready to send
+                            </div>
+                          </div>
+                        </div>
+
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0 }}>
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-outline"
+                            onClick={clearPendingAttachment}
+                            disabled={isUploadingAttachment}
+                          >
+                            Remove
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-primary"
+                            onClick={sendPendingAttachment}
+                            disabled={isUploadingAttachment}
+                          >
+                            {isUploadingAttachment ? 'Uploading...' : 'Send Attachment'}
+                          </button>
+                        </div>
+                      </div>
+
+                      {pendingAttachment.isPdf && pendingAttachment.previewUrl && (
+                        <iframe
+                          src={pendingAttachment.previewUrl}
+                          title={`Preview ${pendingAttachment.name}`}
+                          style={{
+                            width: '100%',
+                            height: '180px',
+                            border: '1px solid var(--color-border)',
+                            borderRadius: '8px',
+                            backgroundColor: '#ffffff',
+                          }}
+                        />
+                      )}
+                    </div>
+                  )}
 
                   {/* Active Voice Recording or Preview Bar */}
                   {isRecordingVoice ? (
@@ -2612,15 +3321,11 @@ export function Messages() {
                           }}
                         />
                         <span style={{ fontWeight: '600', fontSize: '0.9rem', color: '#ef4444' }}>
-                          Recording voice note... {formatDuration(recordingSeconds)} / 05:00
+                          Recording voice note... {formatDuration(recordingSeconds)} (max 5m 0s)
                         </span>
                       </div>
                       <div style={{ display: 'flex', gap: '0.5rem' }}>
-                        <button
-                          type="button"
-                          className="btn btn-sm btn-outline"
-                          onClick={cancelVoiceRecording}
-                        >
+                        <button type="button" className="btn btn-sm btn-outline" onClick={cancelVoiceRecording}>
                           Cancel
                         </button>
                         <button
@@ -2658,11 +3363,7 @@ export function Messages() {
                         <span style={{ fontSize: '0.85rem', fontWeight: '600', color: 'var(--color-text-primary)' }}>
                           Preview ({formatDuration(voicePreview.duration)})
                         </span>
-                        <audio
-                          controls
-                          src={voicePreview.url}
-                          style={{ height: '34px', maxWidth: '240px' }}
-                        />
+                        <audio controls src={voicePreview.url} style={{ height: '34px', maxWidth: '240px' }} />
                       </div>
                       <div style={{ display: 'flex', gap: '0.5rem' }}>
                         <button
@@ -2712,7 +3413,7 @@ export function Messages() {
                         disabled={isSending || isUploadingAttachment || activeConv?.is_closed}
                         className="btn btn-sm btn-outline"
                         style={{ padding: '0.55rem', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                        title="Attach file (PDF, DOCX, XLSX, PNG, JPG, WebP, GIF up to 15MB)"
+                        title="Select attachment to preview before sending (PDF, DOCX, XLSX, PNG, JPG, WebP, GIF up to 15MB)"
                       >
                         <PaperclipIcon size={18} />
                       </button>
@@ -2739,6 +3440,8 @@ export function Messages() {
                             ? 'This thread is closed (declined booking). Messages are read-only.'
                             : isUploadingAttachment
                             ? 'Uploading attachment...'
+                            : pendingAttachment
+                            ? `Add an optional message with ${pendingAttachment.name} or press Send...`
                             : `Message ${activePeer.name}...`
                         }
                         value={messageText}
@@ -2749,9 +3452,14 @@ export function Messages() {
                       <button
                         type="submit"
                         className="btn btn-primary"
-                        disabled={isSending || isUploadingAttachment || activeConv?.is_closed || !messageText.trim()}
+                        disabled={
+                          isSending ||
+                          isUploadingAttachment ||
+                          activeConv?.is_closed ||
+                          (!messageText.trim() && !pendingAttachment)
+                        }
                       >
-                        {isSending ? 'Sending...' : 'Send'}
+                        {isSending || isUploadingAttachment ? 'Sending...' : 'Send'}
                       </button>
                     </form>
                   )}
@@ -2772,7 +3480,14 @@ export function Messages() {
               }}
             >
               <MessageIcon size={48} style={{ opacity: 0.4, marginBottom: '1rem' }} />
-              <h3 style={{ fontSize: '1.1rem', fontWeight: '600', color: 'var(--color-text-primary)', marginBottom: '0.5rem' }}>
+              <h3
+                style={{
+                  fontSize: '1.1rem',
+                  fontWeight: '600',
+                  color: 'var(--color-text-primary)',
+                  marginBottom: '0.5rem',
+                }}
+              >
                 Select a conversation
               </h3>
               <p style={{ fontSize: '0.88rem', maxWidth: '360px' }}>
@@ -2823,7 +3538,14 @@ export function Messages() {
                       ? 'Microphone / Camera Permission Blocked'
                       : 'Media Device Unavailable'}
                   </h4>
-                  <p style={{ fontSize: '0.88rem', color: 'var(--color-text-secondary)', marginTop: '0.35rem', lineHeight: '1.4' }}>
+                  <p
+                    style={{
+                      fontSize: '0.88rem',
+                      color: 'var(--color-text-secondary)',
+                      marginTop: '0.35rem',
+                      lineHeight: '1.4',
+                    }}
+                  >
                     {permissionError.message}
                   </p>
                 </div>
@@ -2841,7 +3563,9 @@ export function Messages() {
                     lineHeight: '1.4',
                   }}
                 >
-                  💡 <strong>How to enable:</strong> Click the camera or lock icon on the left side of your browser address bar, set Microphone (and Camera for video calls) to <em>Allow</em>, then click <strong>Try Again</strong> below.
+                  💡 <strong>How to enable:</strong> Click the camera or lock icon on the left side of your browser
+                  address bar, set Microphone (and Camera for video calls) to <em>Allow</em>, then click{' '}
+                  <strong>Try Again</strong> below.
                 </div>
               )}
 
@@ -2859,7 +3583,7 @@ export function Messages() {
                     className="btn btn-sm btn-secondary"
                     onClick={() => {
                       setPermissionError(null);
-                      initiateCall('audio');
+                      initiateCall('audio', { forceInPlace: isDedicatedCallTab });
                     }}
                   >
                     Switch to Audio Call
@@ -2876,9 +3600,9 @@ export function Messages() {
                     if (ctx === 'voice') {
                       startVoiceRecording();
                     } else if (isInc) {
-                      acceptIncomingCall();
+                      acceptIncomingCall({ forceInPlace: isDedicatedCallTab });
                     } else {
-                      initiateCall(mode);
+                      initiateCall(mode, { forceInPlace: isDedicatedCallTab });
                     }
                   }}
                 >
@@ -2910,23 +3634,14 @@ export function Messages() {
                 display: 'flex',
                 alignItems: 'center',
                 gap: '1.25rem',
+                flexWrap: 'wrap',
               }}
             >
-              <div
-                style={{
-                  width: '48px',
-                  height: '48px',
-                  borderRadius: '50%',
-                  backgroundColor: 'rgba(37, 99, 235, 0.2)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: 'var(--color-primary)',
-                  animation: 'pulse 1.2s infinite',
-                }}
-              >
-                {incomingCallData?.mode === 'audio' ? <PhoneIcon size={24} /> : <VideoIcon size={24} />}
-              </div>
+              {renderParticipantAvatar(
+                { name: incomingCallData?.callerName || activePeer?.name || 'Peer', avatar_url: activePeer?.avatar_url },
+                48,
+                'var(--color-primary)'
+              )}
               <div>
                 <div style={{ fontWeight: '700', fontSize: '1rem', color: 'var(--color-text-primary)' }}>
                   Incoming {incomingCallData?.mode === 'audio' ? 'Audio' : 'Video'} Call
@@ -2950,6 +3665,7 @@ export function Messages() {
                   onClick={() => acceptIncomingCall()}
                   className="btn btn-sm btn-primary"
                   style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}
+                  title={isDedicatedCallTab ? 'Accept call' : 'Accept call in a separate tab'}
                 >
                   <PhoneIcon size={14} />
                   <span>Accept</span>
@@ -2959,51 +3675,57 @@ export function Messages() {
           )}
 
           {/* ---------------------------------------------------------------- */}
-          {/* ACTIVE IN-WEBSITE CALL OVERLAY                                    */}
+          {/* FULL-PAGE / IN-WEBSITE CALL STAGE                                 */}
           {/* ---------------------------------------------------------------- */}
-          {['outgoing', 'connecting', 'connected', 'disconnected'].includes(callStatus) && (
+          {(isDedicatedCallTab ||
+            ['outgoing', 'connecting', 'connected', 'disconnected'].includes(callStatus)) && (
             <div
               style={{
                 position: 'absolute',
                 inset: 0,
                 zIndex: 90,
-                backgroundColor: 'rgba(15, 23, 42, 0.96)',
+                backgroundColor: '#020617',
                 display: 'flex',
                 flexDirection: 'column',
                 overflow: 'hidden',
               }}
             >
-              {/* Call Top Header */}
+              {/* Call Top Header — Shows both participants' avatars & names, status, and duration */}
               <div
                 style={{
-                  padding: '0.85rem 1.5rem',
+                  padding: '0.75rem 1.25rem',
                   display: 'flex',
                   justifyContent: 'space-between',
                   alignItems: 'center',
                   borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
+                  backgroundColor: 'rgba(15, 23, 42, 0.96)',
                   color: '#ffffff',
                   flexWrap: 'wrap',
-                  gap: '0.5rem',
+                  gap: '0.75rem',
+                  flexShrink: 0,
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-                  <span
-                    style={{
-                      width: '10px',
-                      height: '10px',
-                      borderRadius: '50%',
-                      backgroundColor:
-                        connectionState === 'connected'
-                          ? '#10b981'
-                          : connectionState === 'disconnected' || connectionState === 'failed'
-                          ? '#ef4444'
-                          : '#f59e0b',
-                      animation: connectionState === 'connected' ? 'none' : 'pulse 1.5s infinite',
-                    }}
-                  />
-                  <span style={{ fontWeight: '700', fontSize: '1rem' }}>
-                    {activePeer?.name || 'Peer'} • {callMode === 'audio' ? 'Audio Call' : 'Video Call'}
+                  {/* Both participants' avatars & names */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    {renderParticipantAvatar(activePeer, 34, '#3b82f6')}
+                    <span style={{ fontWeight: '700', fontSize: '0.96rem' }}>
+                      {activePeer?.name || 'Peer'}
+                    </span>
+                  </div>
+                  <span style={{ color: '#64748b', fontSize: '0.85rem' }}>↔</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                    {renderParticipantAvatar(user, 30, '#10b981')}
+                    <span style={{ fontWeight: '600', fontSize: '0.88rem', color: '#cbd5e1' }}>
+                      {user?.name || 'You'} (You)
+                    </span>
+                  </div>
+
+                  <span style={{ color: '#475569' }}>•</span>
+                  <span style={{ fontSize: '0.85rem', color: '#94a3b8', fontWeight: '600' }}>
+                    {callMode === 'audio' ? 'Audio Call' : 'Video Call'}
                   </span>
+
                   <span
                     style={{
                       fontSize: '0.75rem',
@@ -3013,13 +3735,19 @@ export function Messages() {
                       backgroundColor:
                         connectionState === 'connected'
                           ? 'rgba(16, 185, 129, 0.2)'
-                          : connectionState === 'disconnected'
+                          : connectionState === 'disconnected' ||
+                            callStatus === 'failed' ||
+                            callStatus === 'declined' ||
+                            callStatus === 'missed'
                           ? 'rgba(239, 68, 68, 0.25)'
                           : 'rgba(245, 158, 11, 0.2)',
                       color:
                         connectionState === 'connected'
                           ? '#34d399'
-                          : connectionState === 'disconnected'
+                          : connectionState === 'disconnected' ||
+                            callStatus === 'failed' ||
+                            callStatus === 'declined' ||
+                            callStatus === 'missed'
                           ? '#fca5a5'
                           : '#fbbf24',
                     }}
@@ -3030,8 +3758,19 @@ export function Messages() {
                       ? 'Connecting Media...'
                       : connectionState === 'disconnected'
                       ? 'Disconnected — Reconnecting...'
-                      : 'Ringing...'}
+                      : callStatus === 'outgoing'
+                      ? 'Ringing...'
+                      : callStatus === 'incoming'
+                      ? 'Incoming Call'
+                      : callStatus === 'declined'
+                      ? 'Call Declined'
+                      : callStatus === 'missed'
+                      ? 'Missed Call'
+                      : callStatus === 'failed'
+                      ? 'Connection Failed'
+                      : 'Call Ended'}
                   </span>
+
                   {remoteMediaState.micMuted && (
                     <span
                       style={{
@@ -3059,7 +3798,8 @@ export function Messages() {
                     </span>
                   )}
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                   <button
                     type="button"
                     onClick={() => setShowInCallChat(!showInCallChat)}
@@ -3075,24 +3815,53 @@ export function Messages() {
                     <MessageIcon size={14} />
                     <span>In-Call Chat ({messages.length})</span>
                   </button>
-                  <div style={{ fontWeight: '600', fontSize: '0.95rem', color: '#94a3b8' }}>
+                  <div
+                    style={{
+                      fontWeight: '700',
+                      fontSize: '0.92rem',
+                      color: '#e2e8f0',
+                      backgroundColor: 'rgba(255, 255, 255, 0.08)',
+                      padding: '0.25rem 0.65rem',
+                      borderRadius: '8px',
+                    }}
+                  >
                     {callStatus === 'outgoing' ? 'Ringing...' : formatDuration(callDuration)}
                   </div>
+                  {isDedicatedCallTab && (
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline"
+                      style={{ color: '#cbd5e1', borderColor: 'rgba(255,255,255,0.2)' }}
+                      onClick={() => {
+                        if (['outgoing', 'connecting', 'connected', 'disconnected'].includes(callStatus)) {
+                          endCall();
+                        }
+                        if (window.opener && !window.opener.closed) {
+                          window.close();
+                        } else {
+                          navigate(`/messages?conversationId=${encodeURIComponent(activeConvId)}`);
+                        }
+                      }}
+                    >
+                      Back to Messages
+                    </button>
+                  )}
                 </div>
               </div>
 
-              {/* Prominent Screen Sharing Active Banner with Stop Sharing Button */}
+              {/* Prominent Screen Sharing Active Banner with Stop Sharing Screen Button */}
               {isScreenSharing && (
                 <div
                   style={{
                     padding: '0.55rem 1.25rem',
-                    backgroundColor: 'rgba(37, 99, 235, 0.28)',
-                    borderBottom: '1px solid rgba(96, 165, 250, 0.35)',
+                    backgroundColor: 'rgba(37, 99, 235, 0.32)',
+                    borderBottom: '1px solid rgba(96, 165, 250, 0.4)',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
                     color: '#ffffff',
-                    fontSize: '0.84rem',
+                    fontSize: '0.85rem',
+                    flexShrink: 0,
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -3105,9 +3874,35 @@ export function Messages() {
                     type="button"
                     onClick={stopScreenShare}
                     className="btn btn-sm btn-danger"
-                    style={{ fontWeight: '700', padding: '0.25rem 0.75rem' }}
+                    style={{ fontWeight: '700', padding: '0.3rem 0.85rem' }}
                   >
-                    Stop Sharing Screen
+                    Stop sharing screen
+                  </button>
+                </div>
+              )}
+
+              {/* Informational Notice Banner (e.g. camera in use by another tab) */}
+              {callStatusNotice && callStatus !== 'disconnected' && (
+                <div
+                  style={{
+                    padding: '0.45rem 1.25rem',
+                    backgroundColor: 'rgba(59, 130, 246, 0.18)',
+                    borderBottom: '1px solid rgba(59, 130, 246, 0.3)',
+                    color: '#bfdbfe',
+                    fontSize: '0.8rem',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    flexShrink: 0,
+                  }}
+                >
+                  <span>{callStatusNotice}</span>
+                  <button
+                    type="button"
+                    onClick={() => setCallStatusNotice(null)}
+                    style={{ background: 'none', border: 'none', color: '#93c5fd', cursor: 'pointer' }}
+                  >
+                    <CloseIcon size={14} />
                   </button>
                 </div>
               )}
@@ -3124,24 +3919,17 @@ export function Messages() {
                     justifyContent: 'space-between',
                     color: '#ffffff',
                     fontSize: '0.84rem',
+                    flexShrink: 0,
                   }}
                 >
                   <span>
                     {callStatusNotice || 'Connection temporarily interrupted. Attempting to restore audio/video...'}
                   </span>
                   <div style={{ display: 'flex', gap: '0.5rem' }}>
-                    <button
-                      type="button"
-                      onClick={retryReconnectCall}
-                      className="btn btn-sm btn-primary"
-                    >
+                    <button type="button" onClick={retryReconnectCall} className="btn btn-sm btn-primary">
                       Reconnect Now
                     </button>
-                    <button
-                      type="button"
-                      onClick={endCall}
-                      className="btn btn-sm btn-danger"
-                    >
+                    <button type="button" onClick={endCall} className="btn btn-sm btn-danger">
                       Hang Up
                     </button>
                   </div>
@@ -3149,17 +3937,20 @@ export function Messages() {
               )}
 
               {/* Main Call Body (Video/Audio Stage + In-Call Chat Drawer) */}
-              <div style={{ flex: 1, display: 'flex', overflow: 'hidden', position: 'relative' }}>
+              <div style={{ flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden', position: 'relative' }}>
                 {/* Video Viewport / Stage */}
                 <div
                   style={{
                     flex: 1,
+                    minWidth: 0,
+                    minHeight: 0,
                     position: 'relative',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
                     backgroundColor: '#020617',
                     overflow: 'hidden',
+                    padding: '0.75rem',
                   }}
                 >
                   {/* Remote Video Element (always mounted in call overlay so incoming video tracks attach immediately) */}
@@ -3170,7 +3961,10 @@ export function Messages() {
                     style={{
                       width: '100%',
                       height: '100%',
+                      maxWidth: '100%',
+                      maxHeight: '100%',
                       objectFit: 'contain',
+                      borderRadius: '12px',
                       display:
                         callMode === 'video' &&
                         hasRemoteVideoTrack &&
@@ -3180,94 +3974,192 @@ export function Messages() {
                     }}
                   />
 
-                  {/* Remote Avatar / Status Placeholder when in Audio mode or before remote video track is active */}
+                  {/* Remote Avatar & Participant Status Card when in Audio mode, before remote video track arrives, or after call ends */}
                   {(callMode === 'audio' ||
                     !hasRemoteVideoTrack ||
-                    (remoteMediaState.cameraOff && !remoteMediaState.screenSharing)) && (
-                    <div style={{ textAlign: 'center', color: '#ffffff', padding: '1.5rem' }}>
-                      <div
-                        style={{
-                          width: '96px',
-                          height: '96px',
-                          borderRadius: '50%',
-                          backgroundColor: 'rgba(37, 99, 235, 0.3)',
-                          border: '3px solid var(--color-primary)',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          margin: '0 auto 1rem',
-                          fontSize: '2rem',
-                          fontWeight: '700',
-                        }}
-                      >
-                        {(activePeer?.name || 'P').charAt(0).toUpperCase()}
+                    (remoteMediaState.cameraOff && !remoteMediaState.screenSharing) ||
+                    !['outgoing', 'connecting', 'connected', 'disconnected'].includes(callStatus)) && (
+                    <div
+                      style={{
+                        textAlign: 'center',
+                        color: '#ffffff',
+                        padding: '2rem',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        gap: '1rem',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '1.75rem', flexWrap: 'wrap', justifyContent: 'center' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem' }}>
+                          {renderParticipantAvatar(activePeer, 96, 'var(--color-primary)')}
+                          <div style={{ fontSize: '1.15rem', fontWeight: '700' }}>{activePeer?.name || 'Peer'}</div>
+                          <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>
+                            {activePeer?.role || 'Session Partner'}
+                          </span>
+                        </div>
+
+                        <div
+                          style={{
+                            fontSize: '1.5rem',
+                            color: connectionState === 'connected' ? '#10b981' : '#64748b',
+                            fontWeight: '700',
+                          }}
+                        >
+                          ⇄
+                        </div>
+
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem' }}>
+                          {renderParticipantAvatar(user, 96, '#10b981')}
+                          <div style={{ fontSize: '1.15rem', fontWeight: '700' }}>{user?.name || 'You'} (You)</div>
+                          <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>
+                            {isMicMuted ? 'Mic Muted' : 'Mic Active'}
+                          </span>
+                        </div>
                       </div>
-                      <div style={{ fontSize: '1.25rem', fontWeight: '700' }}>{activePeer?.name}</div>
-                      <div style={{ fontSize: '0.88rem', color: '#94a3b8', marginTop: '0.35rem' }}>
+
+                      <div style={{ fontSize: '0.92rem', color: '#cbd5e1', marginTop: '0.35rem' }}>
                         {callStatus === 'outgoing'
                           ? `Ringing ${activePeer?.name || 'participant'}...`
                           : connectionState === 'connecting'
                           ? 'Establishing encrypted peer-to-peer media...'
-                          : remoteMediaState.cameraOff
-                          ? 'Camera is turned off (Audio active)'
-                          : 'Live audio connected'}
+                          : connectionState === 'connected'
+                          ? remoteMediaState.cameraOff
+                            ? `${activePeer?.name || 'Participant'}'s camera is off (Live audio active)`
+                            : `Live ${callMode === 'audio' ? 'audio' : 'audio & video'} call connected (${formatDuration(
+                                callDuration
+                              )})`
+                          : callStatus === 'declined'
+                          ? 'Call was declined.'
+                          : callStatus === 'missed'
+                          ? 'No answer — call missed.'
+                          : callStatus === 'failed'
+                          ? 'Call connection failed.'
+                          : 'Call ended.'}
                       </div>
+
+                      {!['outgoing', 'connecting', 'connected', 'disconnected'].includes(callStatus) && (
+                        <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.5rem', flexWrap: 'wrap', justifyContent: 'center' }}>
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            onClick={() => initiateCall(callMode || 'video', { forceInPlace: true })}
+                          >
+                            Call Again ({callMode === 'audio' ? 'Audio' : 'Video'})
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-outline"
+                            style={{ color: '#ffffff', borderColor: 'rgba(255,255,255,0.25)' }}
+                            onClick={() => navigate(`/messages?conversationId=${encodeURIComponent(activeConvId)}`)}
+                          >
+                            Return to Conversation
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
 
-                  {/* Local Picture-in-Picture Video */}
-                  {(callMode === 'video' || isScreenSharing) && (
+                  {/* Remote Participant Identity Badge (bottom-left of stage) */}
+                  {activePeer && (
                     <div
                       style={{
                         position: 'absolute',
-                        bottom: '1.25rem',
-                        right: '1.25rem',
-                        width: '180px',
-                        height: '124px',
-                        borderRadius: '12px',
-                        overflow: 'hidden',
-                        border: '2px solid rgba(255, 255, 255, 0.25)',
-                        backgroundColor: '#0f172a',
-                        boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.5)',
+                        bottom: '1rem',
+                        left: '1rem',
                         display: 'flex',
                         alignItems: 'center',
-                        justifyContent: 'center',
+                        gap: '0.5rem',
+                        backgroundColor: 'rgba(15, 23, 42, 0.82)',
+                        border: '1px solid rgba(255, 255, 255, 0.15)',
+                        padding: '0.35rem 0.75rem',
+                        borderRadius: '9999px',
+                        color: '#ffffff',
+                        fontSize: '0.8rem',
+                        fontWeight: '600',
+                        pointerEvents: 'none',
                       }}
                     >
-                      <video
-                        ref={setLocalVideoEl}
-                        autoPlay
-                        playsInline
-                        muted
-                        style={{
-                          width: '100%',
-                          height: '100%',
-                          objectFit: 'cover',
-                          display: isVideoDisabled && !isScreenSharing ? 'none' : 'block',
-                        }}
-                      />
-                      {isVideoDisabled && !isScreenSharing && (
-                        <div style={{ textAlign: 'center', color: '#94a3b8', fontSize: '0.75rem', padding: '0.5rem' }}>
-                          <VideoOffIcon size={20} style={{ margin: '0 auto 0.25rem' }} />
-                          <div>Camera Off</div>
-                        </div>
-                      )}
-                      <span
-                        style={{
-                          position: 'absolute',
-                          bottom: '6px',
-                          left: '8px',
-                          fontSize: '0.68rem',
-                          backgroundColor: 'rgba(0, 0, 0, 0.6)',
-                          color: '#ffffff',
-                          padding: '0.1rem 0.4rem',
-                          borderRadius: '4px',
-                        }}
-                      >
-                        {isScreenSharing ? 'Your Screen' : 'You'}
-                      </span>
+                      {renderParticipantAvatar(activePeer, 24, '#3b82f6')}
+                      <span>{activePeer.name}</span>
+                      {remoteMediaState.micMuted && <span style={{ color: '#fca5a5' }}>(Muted)</span>}
                     </div>
                   )}
+
+                  {/* Local Participant Picture-in-Picture Card (bottom-right of stage) */}
+                  <div
+                    style={{
+                      position: 'absolute',
+                      bottom: '1rem',
+                      right: '1rem',
+                      width: '196px',
+                      height: '136px',
+                      borderRadius: '12px',
+                      overflow: 'hidden',
+                      border: '2px solid rgba(255, 255, 255, 0.25)',
+                      backgroundColor: '#0f172a',
+                      boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.5)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <video
+                      ref={setLocalVideoEl}
+                      autoPlay
+                      playsInline
+                      muted
+                      style={{
+                        width: '100%',
+                        height: '100%',
+                        objectFit: 'cover',
+                        display:
+                          (callMode === 'video' || isScreenSharing) && (!isVideoDisabled || isScreenSharing)
+                            ? 'block'
+                            : 'none',
+                      }}
+                    />
+                    {(callMode === 'audio' || (isVideoDisabled && !isScreenSharing)) && (
+                      <div
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: '0.35rem',
+                          color: '#cbd5e1',
+                          fontSize: '0.75rem',
+                          padding: '0.5rem',
+                        }}
+                      >
+                        {renderParticipantAvatar(user, 44, '#10b981')}
+                        <span style={{ color: '#94a3b8', fontSize: '0.7rem' }}>
+                          {callMode === 'audio' ? 'Audio Mode' : 'Camera Off'}
+                        </span>
+                      </div>
+                    )}
+                    <div
+                      style={{
+                        position: 'absolute',
+                        bottom: '6px',
+                        left: '8px',
+                        right: '8px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        fontSize: '0.68rem',
+                        backgroundColor: 'rgba(0, 0, 0, 0.65)',
+                        color: '#ffffff',
+                        padding: '0.15rem 0.45rem',
+                        borderRadius: '6px',
+                      }}
+                    >
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {isScreenSharing ? `${user?.name || 'You'} (Screen)` : `${user?.name || 'You'} (You)`}
+                      </span>
+                      {isMicMuted && <span style={{ color: '#fca5a5', marginLeft: '0.25rem' }}>Muted</span>}
+                    </div>
+                  </div>
 
                   {/* Floating Emojis Animation */}
                   {floatingReactions.map((r) => (
@@ -3292,10 +4184,12 @@ export function Messages() {
                   <div
                     style={{
                       width: '340px',
+                      maxWidth: '40vw',
                       backgroundColor: 'rgba(15, 23, 42, 0.98)',
                       borderLeft: '1px solid rgba(255, 255, 255, 0.1)',
                       display: 'flex',
                       flexDirection: 'column',
+                      minHeight: 0,
                       zIndex: 10,
                     }}
                   >
@@ -3307,6 +4201,7 @@ export function Messages() {
                         alignItems: 'center',
                         justifyContent: 'space-between',
                         color: '#ffffff',
+                        flexShrink: 0,
                       }}
                     >
                       <div>
@@ -3333,58 +4228,86 @@ export function Messages() {
                     <div
                       style={{
                         flex: 1,
+                        minHeight: 0,
                         overflowY: 'auto',
                         padding: '1rem',
                         display: 'flex',
                         flexDirection: 'column',
-                        gap: '0.65rem',
+                        gap: '0.45rem',
                       }}
                     >
-                      {messages.map((m) => {
+                      {messages.map((m, mIdx) => {
+                        const prevM = mIdx > 0 ? messages[mIdx - 1] : null;
+                        const showGrp = shouldShowGroupTimestamp(m, prevM);
+                        const grpLabel = showGrp ? formatGroupTimestamp(m.created_at, prevM?.created_at) : '';
+
                         if (m.message_type === 'call_log') {
                           return (
-                            <div
-                              key={m.id || m.created_at}
-                              style={{
-                                alignSelf: 'center',
-                                fontSize: '0.72rem',
-                                color: '#94a3b8',
-                                padding: '0.2rem 0.6rem',
-                                borderRadius: '9999px',
-                                backgroundColor: 'rgba(255, 255, 255, 0.06)',
-                              }}
-                            >
-                              {m.content}
-                            </div>
+                            <React.Fragment key={m.id || m.created_at}>
+                              {showGrp && grpLabel && (
+                                <div
+                                  style={{
+                                    alignSelf: 'center',
+                                    fontSize: '0.68rem',
+                                    color: '#64748b',
+                                    margin: '0.35rem 0 0.15rem',
+                                  }}
+                                >
+                                  {grpLabel}
+                                </div>
+                              )}
+                              <div
+                                style={{
+                                  alignSelf: 'center',
+                                  fontSize: '0.72rem',
+                                  color: '#94a3b8',
+                                  padding: '0.2rem 0.6rem',
+                                  borderRadius: '9999px',
+                                  backgroundColor: 'rgba(255, 255, 255, 0.06)',
+                                }}
+                              >
+                                {formatCallLogContent(m)}
+                              </div>
+                            </React.Fragment>
                           );
                         }
                         const isMe = m.sender_id === user?.id;
                         return (
-                          <div
-                            key={m.id || m.created_at}
-                            style={{
-                              alignSelf: isMe ? 'flex-end' : 'flex-start',
-                              maxWidth: '85%',
-                              backgroundColor: isMe ? 'var(--color-primary)' : 'rgba(255, 255, 255, 0.12)',
-                              color: '#ffffff',
-                              padding: '0.5rem 0.85rem',
-                              borderRadius: '12px',
-                              fontSize: '0.85rem',
-                              lineHeight: '1.4',
-                              wordBreak: 'break-word',
-                            }}
-                          >
-                            <div>
-                              {m.message_type === 'voice'
-                                ? `🎤 Voice Note${m.duration_seconds ? ` (${m.duration_seconds}s)` : ''}`
-                                : m.message_type === 'attachment'
-                                ? `📎 ${m.attachment_original_name || m.content}`
-                                : m.content}
+                          <React.Fragment key={m.id || m.created_at}>
+                            {showGrp && grpLabel && (
+                              <div
+                                style={{
+                                  alignSelf: 'center',
+                                  fontSize: '0.68rem',
+                                  color: '#94a3b8',
+                                  margin: '0.35rem 0 0.15rem',
+                                }}
+                              >
+                                {grpLabel}
+                              </div>
+                            )}
+                            <div
+                              style={{
+                                alignSelf: isMe ? 'flex-end' : 'flex-start',
+                                maxWidth: '85%',
+                                backgroundColor: isMe ? 'var(--color-primary)' : 'rgba(255, 255, 255, 0.12)',
+                                color: '#ffffff',
+                                padding: '0.5rem 0.85rem',
+                                borderRadius: '12px',
+                                fontSize: '0.85rem',
+                                lineHeight: '1.4',
+                                wordBreak: 'break-word',
+                              }}
+                            >
+                              <div>
+                                {m.message_type === 'voice'
+                                  ? `🎤 Voice Note${m.duration_seconds ? ` (${formatDuration(m.duration_seconds)})` : ''}`
+                                  : m.message_type === 'attachment'
+                                  ? `📎 ${m.attachment_original_name || m.content}`
+                                  : m.content}
+                              </div>
                             </div>
-                            <div style={{ fontSize: '0.68rem', opacity: 0.65, marginTop: '0.2rem', textAlign: 'right' }}>
-                              {new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                            </div>
-                          </div>
+                          </React.Fragment>
                         );
                       })}
                       <div ref={inCallMessagesEndRef} />
@@ -3397,6 +4320,7 @@ export function Messages() {
                         borderTop: '1px solid rgba(255, 255, 255, 0.1)',
                         display: 'flex',
                         gap: '0.5rem',
+                        flexShrink: 0,
                       }}
                     >
                       <input
@@ -3415,11 +4339,7 @@ export function Messages() {
                           outline: 'none',
                         }}
                       />
-                      <button
-                        type="submit"
-                        className="btn btn-sm btn-primary"
-                        disabled={!inCallText.trim()}
-                      >
+                      <button type="submit" className="btn btn-sm btn-primary" disabled={!inCallText.trim()}>
                         Send
                       </button>
                     </form>
@@ -3427,10 +4347,10 @@ export function Messages() {
                 )}
               </div>
 
-              {/* Call Controls Footer */}
+              {/* Call Controls Footer (always visible, flexShrink: 0) */}
               <div
                 style={{
-                  padding: '1rem 1.25rem',
+                  padding: '0.85rem 1.25rem',
                   display: 'flex',
                   justifyContent: 'center',
                   alignItems: 'center',
@@ -3438,6 +4358,7 @@ export function Messages() {
                   borderTop: '1px solid rgba(255, 255, 255, 0.1)',
                   backgroundColor: 'rgba(15, 23, 42, 0.98)',
                   flexWrap: 'wrap',
+                  flexShrink: 0,
                 }}
               >
                 {/* Mute Mic */}
@@ -3448,17 +4369,20 @@ export function Messages() {
                   style={{
                     backgroundColor: isMicMuted ? '#dc2626' : 'rgba(255, 255, 255, 0.15)',
                     color: '#ffffff',
-                    borderRadius: '50%',
-                    width: '46px',
-                    height: '46px',
-                    padding: 0,
+                    borderRadius: '9999px',
+                    height: '44px',
+                    padding: '0 0.95rem',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
+                    gap: '0.4rem',
+                    fontSize: '0.82rem',
+                    fontWeight: '600',
                   }}
                   title={isMicMuted ? 'Unmute microphone' : 'Mute microphone'}
                 >
-                  {isMicMuted ? <MicOffIcon size={20} /> : <MicIcon size={20} />}
+                  {isMicMuted ? <MicOffIcon size={18} /> : <MicIcon size={18} />}
+                  <span>{isMicMuted ? 'Unmute' : 'Mute'}</span>
                 </button>
 
                 {/* Toggle Camera On/Off */}
@@ -3469,31 +4393,9 @@ export function Messages() {
                   style={{
                     backgroundColor: isVideoDisabled ? '#dc2626' : 'rgba(255, 255, 255, 0.15)',
                     color: '#ffffff',
-                    borderRadius: '50%',
-                    width: '46px',
-                    height: '46px',
-                    padding: 0,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                  }}
-                  title={isVideoDisabled ? 'Turn camera on' : 'Turn camera off'}
-                >
-                  {isVideoDisabled ? <VideoOffIcon size={20} /> : <VideoIcon size={20} />}
-                </button>
-
-                {/* Screen Share / Stop Sharing */}
-                <button
-                  type="button"
-                  onClick={toggleScreenShare}
-                  className="btn"
-                  style={{
-                    backgroundColor: isScreenSharing ? 'var(--color-primary)' : 'rgba(255, 255, 255, 0.15)',
-                    color: '#ffffff',
-                    borderRadius: isScreenSharing ? '9999px' : '50%',
-                    height: '46px',
-                    width: isScreenSharing ? 'auto' : '46px',
-                    padding: isScreenSharing ? '0 1rem' : 0,
+                    borderRadius: '9999px',
+                    height: '44px',
+                    padding: '0 0.95rem',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
@@ -3501,10 +4403,34 @@ export function Messages() {
                     fontSize: '0.82rem',
                     fontWeight: '600',
                   }}
-                  title={isScreenSharing ? 'Stop screen sharing' : 'Share screen'}
+                  title={isVideoDisabled ? 'Turn camera on' : 'Turn camera off'}
                 >
-                  <ScreenShareIcon size={20} />
-                  {isScreenSharing && <span>Stop Sharing</span>}
+                  {isVideoDisabled ? <VideoOffIcon size={18} /> : <VideoIcon size={18} />}
+                  <span>{isVideoDisabled ? 'Camera On' : 'Camera Off'}</span>
+                </button>
+
+                {/* Screen Share / Stop Sharing Screen */}
+                <button
+                  type="button"
+                  onClick={toggleScreenShare}
+                  className="btn"
+                  style={{
+                    backgroundColor: isScreenSharing ? '#dc2626' : 'rgba(255, 255, 255, 0.15)',
+                    color: '#ffffff',
+                    borderRadius: '9999px',
+                    height: '44px',
+                    padding: '0 1rem',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '0.4rem',
+                    fontSize: '0.82rem',
+                    fontWeight: '700',
+                  }}
+                  title={isScreenSharing ? 'Stop sharing screen' : 'Share screen'}
+                >
+                  <ScreenShareIcon size={18} />
+                  <span>{isScreenSharing ? 'Stop sharing screen' : 'Share Screen'}</span>
                 </button>
 
                 {/* In-Call Chat Toggle Button */}
@@ -3515,21 +4441,24 @@ export function Messages() {
                   style={{
                     backgroundColor: showInCallChat ? 'var(--color-primary)' : 'rgba(255, 255, 255, 0.15)',
                     color: '#ffffff',
-                    borderRadius: '50%',
-                    width: '46px',
-                    height: '46px',
-                    padding: 0,
+                    borderRadius: '9999px',
+                    height: '44px',
+                    padding: '0 0.95rem',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
+                    gap: '0.4rem',
+                    fontSize: '0.82rem',
+                    fontWeight: '600',
                   }}
                   title={showInCallChat ? 'Hide in-call chat' : 'Open in-call chat'}
                 >
-                  <MessageIcon size={20} />
+                  <MessageIcon size={18} />
+                  <span>Chat</span>
                 </button>
 
                 {/* Floating Reactions Toolbar */}
-                <div style={{ display: 'flex', gap: '0.35rem', margin: '0 0.25rem' }}>
+                <div style={{ display: 'flex', gap: '0.3rem', margin: '0 0.15rem' }}>
                   {['👏', '❤️', '🎉', '👍', '💡'].map((emoji) => (
                     <button
                       key={emoji}
@@ -3538,7 +4467,7 @@ export function Messages() {
                       style={{
                         background: 'transparent',
                         border: 'none',
-                        fontSize: '1.3rem',
+                        fontSize: '1.25rem',
                         cursor: 'pointer',
                         padding: '0.2rem',
                       }}
@@ -3556,8 +4485,8 @@ export function Messages() {
                   className="btn btn-danger"
                   style={{
                     borderRadius: '9999px',
-                    height: '46px',
-                    padding: '0 1.1rem',
+                    height: '44px',
+                    padding: '0 1.15rem',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',

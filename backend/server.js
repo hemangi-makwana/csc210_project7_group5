@@ -1650,6 +1650,56 @@ application.post("/api/sessions/book", async (request, response) => {
       });
     }
 
+    // Validate submitted skill/topic against the mentor's currently verified teachable skills in PostgreSQL
+    const verifiedSkillsRes = await query(
+      `SELECT id, skill_name, level, is_verified, verified_at
+       FROM skills
+       WHERE user_id = $1 AND type = 'teach' AND is_verified = TRUE
+       ORDER BY skill_name ASC`,
+      [String(mentorId)]
+    );
+    const verifiedSkills = verifiedSkillsRes.rows || [];
+    const verifiedSkillNames = verifiedSkills.map((s) => s.skill_name);
+
+    if (verifiedSkills.length === 0) {
+      return response.status(400).json({
+        error: "This mentor has no verified teaching skills available.",
+        verifiedSkills: [],
+      });
+    }
+
+    const explicitSkill = typeof request.body.skill === "string" ? request.body.skill.trim() : "";
+    const rawTopic = typeof topic === "string" ? topic.trim() : "";
+    const submittedSkill = explicitSkill || rawTopic;
+
+    if (!submittedSkill) {
+      return response.status(400).json({
+        error: `Please choose one of this mentor's verified skills: ${verifiedSkillNames.join(", ")}.`,
+        verifiedSkills: verifiedSkillNames,
+      });
+    }
+
+    const lowerSubmitted = submittedSkill.toLowerCase();
+    const matchedVerifiedSkill = verifiedSkills.find((vs) => {
+      const lowerVerified = String(vs.skill_name || "").trim().toLowerCase();
+      if (!lowerVerified) return false;
+      if (lowerSubmitted === lowerVerified) return true;
+      // Allow topic strings that begin with the verified skill name followed by a separator (e.g. "Python Basics") when explicit skill wasn't separately passed
+      if (!explicitSkill && lowerSubmitted.startsWith(lowerVerified + " ")) return true;
+      return false;
+    });
+
+    if (!matchedVerifiedSkill) {
+      return response.status(400).json({
+        error: `This mentor is not verified to teach ${submittedSkill}. Choose one of their verified skills.`,
+        verifiedSkills: verifiedSkillNames,
+      });
+    }
+
+    const canonicalTopic = explicitSkill
+      ? matchedVerifiedSkill.skill_name
+      : rawTopic || matchedVerifiedSkill.skill_name;
+
     const bookingId = `booking_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
 
     // Canonical order to satisfy unique constraint uq_conversation_participants
@@ -1682,7 +1732,8 @@ application.post("/api/sessions/book", async (request, response) => {
       learnerId: String(learnerId),
       scheduledAt: String(scheduledAt),
       status: "pending",
-      topic: topic || "Mentoring Session",
+      topic: canonicalTopic,
+      skill: matchedVerifiedSkill.skill_name,
       notes: notes || "",
       conversationId: convId,
       createdAt: new Date().toISOString(),
@@ -1705,28 +1756,15 @@ application.post("/api/sessions/book", async (request, response) => {
       ]
     );
 
-    // Now link conversation to session_id and ensure thread is open
+    // Link conversation to session_id and ensure thread is open (without inserting automated system chat messages)
     await query(
       `UPDATE conversations
-       SET session_id = $1, is_closed = FALSE, closed_at = NULL, last_message_at = CURRENT_TIMESTAMP
+       SET session_id = $1, is_closed = FALSE, closed_at = NULL
        WHERE id = $2`,
       [bookingId, convId]
     );
 
-    // Initial coordination message into messages table (id is auto-generated SERIAL)
-    const schedDate = new Date(scheduledAt);
-    const dateStr = isNaN(schedDate.getTime()) ? scheduledAt : schedDate.toLocaleString();
-    await query(
-      `INSERT INTO messages (conversation_id, sender_id, content, created_at)
-       VALUES ($1, $2, $3, CURRENT_TIMESTAMP)`,
-      [
-        convId,
-        String(learnerId),
-        `Session booking request submitted for "${bookingRequest.topic}" (Scheduled: ${dateStr}).${notes ? ` Notes: ${notes}` : ""}`,
-      ]
-    ).catch((err) => console.error("Initial booking message insert error:", err));
-
-    // Notification for mentor
+    // Notification for mentor (links directly to Incoming Learner Requests)
     await query(
       `INSERT INTO notifications (user_id, type, title, message, link)
        VALUES ($1, $2, $3, $4, $5)`,
@@ -1799,7 +1837,17 @@ application.post("/api/sessions/:id/accept", authenticateToken, async (request, 
     await query("UPDATE session_bookings SET status = 'accepted' WHERE id = $1", [sessionId]);
     await reconcileBookingQueueFromDatabase();
 
-    // Notify learner
+    // Ensure linked conversation points to this accepted session and is open (without inserting automated chat messages)
+    if (session.conversation_id) {
+      await query(
+        `UPDATE conversations
+         SET session_id = $1, is_closed = FALSE, closed_at = NULL
+         WHERE id = $2`,
+        [sessionId, session.conversation_id]
+      ).catch(() => {});
+    }
+
+    // Notify learner via notifications (not automated chat messages)
     await query(
       `INSERT INTO notifications (user_id, type, title, message, link)
        VALUES ($1, $2, $3, $4, $5)`,
@@ -1811,19 +1859,6 @@ application.post("/api/sessions/:id/accept", authenticateToken, async (request, 
         "/history?view=learning",
       ]
     ).catch(() => {});
-
-    // Post to linked conversation
-    if (session.conversation_id) {
-      await query(
-        `INSERT INTO messages (conversation_id, sender_id, content, created_at)
-         VALUES ($1, $2, $3, CURRENT_TIMESTAMP)`,
-        [
-          session.conversation_id,
-          userId,
-          `Session accepted! Looking forward to our session on "${session.topic}".`,
-        ]
-      ).catch((err) => console.error("Accept message error:", err));
-    }
 
     return response.status(200).json({
       message: "Session booking accepted successfully.",
@@ -1873,25 +1908,15 @@ application.post("/api/sessions/:id/decline", authenticateToken, async (request,
     );
     await reconcileBookingQueueFromDatabase();
 
-    // Close the linked conversation without deleting history
+    // Close the linked conversation without deleting history or inserting automated system messages
     if (session.conversation_id) {
       await query(
         "UPDATE conversations SET is_closed = TRUE, closed_at = CURRENT_TIMESTAMP WHERE id = $1",
         [session.conversation_id]
       ).catch(() => {});
-
-      await query(
-        `INSERT INTO messages (conversation_id, sender_id, content, created_at)
-         VALUES ($1, $2, $3, CURRENT_TIMESTAMP)`,
-        [
-          session.conversation_id,
-          userId,
-          `Session request was declined: "${declineReason}". Coordination thread is now closed.`,
-        ]
-      ).catch((err) => console.error("Decline message error:", err));
     }
 
-    // Notify learner
+    // Notify learner via notifications
     await query(
       `INSERT INTO notifications (user_id, type, title, message, link)
        VALUES ($1, $2, $3, $4, $5)`,
@@ -2833,9 +2858,48 @@ application.get("/api/users/:userId/reviews", async (request, response) => {
 });
 
 /**
+ * ENDPOINT 4E: GET /api/users/:userId/verified-skills
+ * Retrieves a mentor's currently verified teachable skills directly from PostgreSQL.
+ */
+application.get("/api/users/:userId/verified-skills", async (request, response) => {
+  try {
+    const targetUserId = request.params.userId;
+    const conn = await checkConnection();
+    if (!conn.reachable) {
+      return response.status(503).json({ error: "Database unavailable.", verifiedSkills: [] });
+    }
+
+    const userRes = await query("SELECT id, name FROM users WHERE id = $1", [targetUserId]);
+    if (userRes.rows.length === 0) {
+      return response.status(404).json({ error: "Mentor not found.", verifiedSkills: [] });
+    }
+
+    const skillsRes = await query(
+      `SELECT id, skill_name, level, type, is_verified, verified_at
+       FROM skills
+       WHERE user_id = $1 AND type = 'teach' AND is_verified = TRUE
+       ORDER BY skill_name ASC`,
+      [targetUserId]
+    );
+
+    const verifiedSkills = skillsRes.rows || [];
+    return response.status(200).json({
+      userId: targetUserId,
+      mentorName: userRes.rows[0].name,
+      verifiedSkills,
+      verified_skills: verifiedSkills,
+      count: verifiedSkills.length,
+    });
+  } catch (error) {
+    console.error("Error fetching mentor verified skills:", error);
+    return response.status(500).json({ error: "Failed to fetch mentor verified skills." });
+  }
+});
+
+/**
  * ENDPOINT 5: GET /api/users/:userId
  *
- * Retrieves a user's full profile, skills, and reviews from PostgreSQL.
+ * Retrieves a user's full profile, skills, and anonymized reviews from PostgreSQL.
  */
 application.get("/api/users/:userId", async (request, response) => {
   try {
@@ -3991,12 +4055,26 @@ application.get("/api/conversations", authenticateToken, async (request, respons
       return response.status(503).json({ error: "Database unavailable." });
     }
 
+    await cleanupAutomatedBookingChatMessages().catch(() => {});
+
     const convRes = await query(
       `SELECT c.id, c.user1_id, c.user2_id,
-              COALESCE(c.session_id, fallback_sb.id) as session_id,
+              CASE
+                WHEN sb.status IN ('accepted', 'confirmed') THEN c.session_id
+                WHEN fallback_sb.id IS NOT NULL THEN fallback_sb.id
+                ELSE c.session_id
+              END as session_id,
               c.is_closed, c.closed_at, c.last_message_at, c.created_at,
-              COALESCE(sb.status, fallback_sb.status) as session_status,
-              COALESCE(sb.topic, fallback_sb.topic) as session_skill,
+              CASE
+                WHEN sb.status IN ('accepted', 'confirmed') THEN sb.status
+                WHEN fallback_sb.status IS NOT NULL THEN fallback_sb.status
+                ELSE sb.status
+              END as session_status,
+              CASE
+                WHEN sb.status IN ('accepted', 'confirmed') THEN sb.topic
+                WHEN fallback_sb.topic IS NOT NULL THEN fallback_sb.topic
+                ELSE sb.topic
+              END as session_skill,
               json_build_object(
                 'id', peer.id,
                 'name', peer.name,
@@ -4193,6 +4271,8 @@ application.get("/api/conversations/:id/messages", authenticateToken, async (req
       return response.status(503).json({ error: "Database unavailable." });
     }
 
+    await cleanupAutomatedBookingChatMessages().catch(() => {});
+
     // Ownership check: must be a participant
     const convCheck = await query(
       `SELECT id, user1_id, user2_id FROM conversations WHERE id = $1`,
@@ -4261,6 +4341,8 @@ application.post("/api/conversations/:id/messages", authenticateToken, async (re
     if (!conn.reachable) {
       return response.status(503).json({ error: "Database unavailable." });
     }
+
+    await cleanupAutomatedBookingChatMessages().catch(() => {});
 
     // Ownership check: must be a participant
     const convCheck = await query(
@@ -5842,6 +5924,16 @@ application.get("/api/calls/ice-servers", authenticateToken, (request, response)
 });
 
 /**
+ * Helper: Formats call duration in seconds as human-readable minutes and seconds (e.g., "2m 25s").
+ */
+function formatCallDurationText(totalSeconds) {
+  const sec = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+  const mins = Math.floor(sec / 60);
+  const remSecs = sec % 60;
+  return `${mins}m ${remSecs}s`;
+}
+
+/**
  * Helper: Resolves a conversation and its session status for call authorization.
  */
 async function resolveConversationForCall(convId) {
@@ -5849,9 +5941,21 @@ async function resolveConversationForCall(convId) {
     `SELECT c.id, c.user1_id, c.user2_id, c.is_closed,
             c.session_id as direct_session_id,
             sb.status as direct_session_status,
-            COALESCE(c.session_id, fallback_sb.id) as session_id,
-            COALESCE(sb.status, fallback_sb.status) as session_status,
-            COALESCE(sb.topic, fallback_sb.topic) as session_skill
+            CASE
+              WHEN sb.status IN ('accepted', 'confirmed') THEN c.session_id
+              WHEN fallback_sb.id IS NOT NULL THEN fallback_sb.id
+              ELSE c.session_id
+            END as session_id,
+            CASE
+              WHEN sb.status IN ('accepted', 'confirmed') THEN sb.status
+              WHEN fallback_sb.status IS NOT NULL THEN fallback_sb.status
+              ELSE sb.status
+            END as session_status,
+            CASE
+              WHEN sb.status IN ('accepted', 'confirmed') THEN sb.topic
+              WHEN fallback_sb.topic IS NOT NULL THEN fallback_sb.topic
+              ELSE sb.topic
+            END as session_skill
      FROM conversations c
      LEFT JOIN session_bookings sb ON c.session_id = sb.id
      LEFT JOIN LATERAL (
@@ -5879,8 +5983,7 @@ async function resolveConversationForCall(convId) {
  * ENDPOINT: POST /api/calls/signal
  * Sends a WebRTC signaling message (start, offer, accept, answer, candidate, connected,
  * decline, missed, failed, end, media-state, chat_sync, reaction).
- * Strictly authorizes that the caller is one of the two conversation participants and
- * that any linked session is accepted/confirmed.
+ * Strictly authorizes that the caller is one of the two conversation participants.
  */
 application.post("/api/calls/signal", authenticateToken, async (request, response) => {
   try {
@@ -5907,15 +6010,6 @@ application.post("/api/calls/signal", authenticateToken, async (request, respons
 
     if (conv.is_closed) {
       return response.status(400).json({ error: "Cannot place or signal a call in a closed conversation." });
-    }
-
-    // Call permissions: If the conversation is directly linked to a session whose status is not accepted/confirmed,
-    // or has a fallback session that is not accepted/confirmed, block with 400.
-    const effectiveSessionStatus = conv.direct_session_id ? conv.direct_session_status : conv.session_status;
-    if (effectiveSessionStatus && !["accepted", "confirmed"].includes(effectiveSessionStatus)) {
-      return response.status(400).json({
-        error: `WebRTC calls are only enabled for accepted sessions (current session status: "${effectiveSessionStatus}").`,
-      });
     }
 
     const peerId = conv.user1_id === userId ? conv.user2_id : conv.user1_id;
@@ -6106,7 +6200,11 @@ application.post("/api/calls/signal", authenticateToken, async (request, respons
         ).catch(() => {});
       }
     } else if (type === "end") {
-      const duration = payload && payload.duration ? Math.max(0, parseInt(payload.duration, 10) || 0) : 0;
+      let duration = payload && payload.duration ? Math.max(0, parseInt(payload.duration, 10) || 0) : 0;
+      if (duration === 0 && activeCall && activeCall.connectedAt) {
+        duration = Math.max(1, Math.round((now - activeCall.connectedAt) / 1000));
+      }
+      const formattedDuration = formatCallDurationText(duration);
       if (!activeCall || !activeCall.terminalLogged) {
         if (activeCall) {
           activeCall.status = "ended";
@@ -6118,7 +6216,7 @@ application.post("/api/calls/signal", authenticateToken, async (request, respons
              conversation_id, sender_id, content, is_read, created_at,
              message_type, call_action, duration_seconds
            ) VALUES ($1, $2, $3, FALSE, CURRENT_TIMESTAMP, 'call_log', 'ended', $4)`,
-          [convId, userId, `Call ended (${duration}s)`, duration]
+          [convId, userId, `Call ended (${formattedDuration})`, duration]
         ).catch(() => {});
         await query(`UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP WHERE id = $1`, [convId]).catch(() => {});
       }
@@ -6159,12 +6257,6 @@ application.get("/api/calls/signal/:conversationId", authenticateToken, async (r
     }
     if (conv.user1_id !== userId && conv.user2_id !== userId) {
       return response.status(403).json({ error: "Unauthorized: You are not a participant in this conversation." });
-    }
-    const effectiveSessionStatus = conv.direct_session_id ? conv.direct_session_status : conv.session_status;
-    if (effectiveSessionStatus && !["accepted", "confirmed"].includes(effectiveSessionStatus)) {
-      return response.status(403).json({
-        error: `Calling signals are only accessible for accepted sessions (current session status: "${effectiveSessionStatus}").`,
-      });
     }
 
     const queue = callSignalingMap.get(convId) || [];

@@ -41,6 +41,10 @@ export function App() {
 
   // Pure auth routes that use full-screen banner layout
   const isAuthRoute = location.pathname === '/login' || location.pathname === '/register';
+  const searchParams = new URLSearchParams(location.search);
+  const isDedicatedCallTab =
+    location.pathname === '/call' ||
+    (location.pathname === '/messages' && searchParams.get('callTab') === '1');
 
   // Initial application startup while validating stored session in localStorage/backend
   if (isLoading) {
@@ -75,6 +79,18 @@ export function App() {
         <Route path="/register" element={<Register />} />
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
+    );
+  }
+
+  if (isDedicatedCallTab) {
+    return (
+      <div style={{ width: '100vw', height: '100vh', overflow: 'hidden', backgroundColor: '#050811' }}>
+        <Routes>
+          <Route path="/call" element={<Messages forceCallTab={true} />} />
+          <Route path="/messages" element={<Messages forceCallTab={true} />} />
+          <Route path="*" element={<Messages forceCallTab={true} />} />
+        </Routes>
+      </div>
     );
   }
 
@@ -115,6 +131,7 @@ export function App() {
 
             <Route path="/notifications" element={<Notifications />} />
             <Route path="/messages" element={<Messages />} />
+            <Route path="/call" element={<Messages forceCallTab={true} />} />
             <Route path="/login" element={<Navigate to="/" replace />} />
             <Route path="/register" element={<Navigate to="/" replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />
