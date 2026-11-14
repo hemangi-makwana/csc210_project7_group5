@@ -74,7 +74,7 @@ The application is structured into a modular **4-layer architecture**:
 3. **Backend Layer**: Node.js / Express service comprising:
    - **Auth & API Gateway**: JWT authentication, Role-Based Access Control (RBAC), input validation.
    - **DSA Engine**: Core algorithmic engine implementing Hash Tables, Graphs, Heaps, and Queues.
-4. **Data Layer**: PostgreSQL / MongoDB for persistent records with optional Redis caching.
+4. **Data Layer**: PostgreSQL for persistent records with optional Redis caching.
 
 ```mermaid
 flowchart TD
